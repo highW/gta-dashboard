@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-page: #030712;
+  --bg-surface: #111827;
+  --bg-surface-hover: rgba(31, 41, 55, 0.5);
+  --border-color: #1f2937;
+  --text-primary: #f3f4f6;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+}
+
+.light {
+  --bg-page: #f9fafb;
+  --bg-surface: #ffffff;
+  --bg-surface-hover: rgba(243, 244, 246, 0.7);
+  --border-color: #e5e7eb;
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-muted: #6b7280;
+}
