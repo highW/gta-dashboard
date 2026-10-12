@@ -10,6 +10,8 @@
   --text-primary: #f3f4f6;
   --text-secondary: #9ca3af;
   --text-muted: #6b7280;
+  --accent: #ed1c2e;
+  --accent-soft: rgba(237, 28, 46, 0.1);
 }
 
 .light {

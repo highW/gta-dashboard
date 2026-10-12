@@ -11,7 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
-
+dashboard.db
+*.db
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

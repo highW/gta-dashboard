@@ -17,7 +17,7 @@ export default function PlayerDetailPanel({
     onClose: () => void;
     onDeleted: () => void;
 }) {
-    const { role } = useAuth();
+    const { can } = useAuth();
     if (!player) return null;
 
     const handleDelete = () => {
@@ -55,7 +55,7 @@ export default function PlayerDetailPanel({
                     <DetailRow label="Current vehicle" value={player.vehicle} />
                     <DetailRow label="Last seen" value={player.lastSeen} />
                 </div>
-            {role == "admin" && (
+            {can("players.delete") && (
                 <button
                     onClick={handleDelete}
                     className="w-full px-4 py-2 text-sm bg-red-600/20 text-red-400 hover:bg-red-600/30 rounded-md border border-red-600/30"

@@ -21,7 +21,7 @@ export default function RecordsView() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [search, setSearch] = useState("");
-    const { role } = useAuth();
+    const { can } = useAuth();
 
     const loadRecords = () => {
         setLoading(true);
@@ -78,7 +78,7 @@ export default function RecordsView() {
 
             {/* Active warrants */}
             <div>
-                {role == "admin" && <NewWarrantForm onCreated = {loadRecords}/>}
+                {can("warrants.issue") && <NewWarrantForm onCreated = {loadRecords}/>}
                 <h2 className="text-lg font-bold mb-3">
                     Active Warrants
                     <span className="ml-2 text-sm font-normal text-red-400">
@@ -110,7 +110,7 @@ export default function RecordsView() {
                                         >
                                             {w.active ? "ACTIVE" : "CLEARED"}
                                         </span>
-                                        {role == "admin" && w.active && (<button
+                                        {can("warrants.clear") && w.active && (<button
                                             onClick={()=>clearWarrant(w.id).then(loadRecords)}
                                             className="ml-2 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] underline">
                                                 Clear
@@ -126,7 +126,7 @@ export default function RecordsView() {
 
             {/* Arrest history */}
             <div>
-                {role == "admin" && <NewArrestForm onCreated={loadRecords}/>}
+                {can("arrests.create") && <NewArrestForm onCreated={loadRecords}/>}
                 <h2 className="text-lg font-bold mb-3">Arrest History</h2>
                 <div className="rounded-lg border border-[var(--border-color)] overflow-hidden">
                     <table className="w-full text-left text-sm">
@@ -147,7 +147,7 @@ export default function RecordsView() {
                                     <td className="px-4 py-3 text-[var(--text-secondary)]">{a.officer}</td>
                                     <td className="px-4 py-3 text-[var(--text-secondary)]">{a.date}</td>
                                     <td className="px-4 py-3">
-                                        {role === "admin" ? (
+                                        {can("arrests.update") ? (
                                             <select
                                                 value={a.status}
                                                 onChange={(e) => updateArrestStatus(a.id, e.target.value as ArrestRecord["status"]).then(loadRecords)}

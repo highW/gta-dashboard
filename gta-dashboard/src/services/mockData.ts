@@ -31,6 +31,27 @@ export function fetchMockPlayers(): Promise<Player[]> {
   });
 }
 
+export interface AuditEntry {
+  id: number;
+  timestamp: string;
+  role: string;
+  actor: string;
+  method: string;
+  path: string;
+  ip: string;
+}
+
+export interface AuditLogResponse {
+  entries: AuditEntry[];
+  next_cursor: number | null;
+}
+
+export function fetchAuditLog(beforeId?: number): Promise<AuditLogResponse> {
+  const params: Record<string, number> = { limit: 25 };
+  if (beforeId) params.before_id = beforeId;
+  return api.get("/audit-log", { params }).then((res) => res.data);
+}
+
 export interface ArrestRecord {
   id: number;
   playerId: number;
@@ -102,4 +123,31 @@ export function updatePlayerStatus(id: number, status: string): Promise<void> {
 
 export function deletePlayer(id: number): Promise<void> {
   return api.delete(`/players/${id}`).then(() => undefined);
+}
+
+export interface Stats {
+  players: { total: number; online: number; idle: number; offline: number };
+  warrants: { total: number; active: number };
+  arrests: { total: number; pending: number };
+}
+
+export function fetchStats(): Promise<Stats> {
+  return api.get("/stats").then((res) => res.data);
+}
+
+export interface Member {
+  userId: number;
+  discordId: string;
+  username: string;
+  displayName: string;
+  lastLogin: string | null;
+  role: string | null; // null = signed in, no access yet
+}
+
+export function fetchMembers(): Promise<Member[]> {
+  return api.get("/members").then((res) => res.data);
+}
+
+export function setMemberRole(userId: number, role: string): Promise<void> {
+  return api.put(`/members/${userId}`, { role }).then(() => undefined);
 }
