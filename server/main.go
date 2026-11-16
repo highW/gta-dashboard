@@ -8,47 +8,52 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
-	"golang.org/x/time/rate"
 )
 
+// Dates and times in the API:
+//   - a moment in time (lastSeen, audit timestamp) is UTC in RFC 3339 form,
+//     "2026-11-16T21:04:05Z"; the browser turns it into local time.
+//   - a calendar day (date, dateIssued) is "2026-11-16".
+// The database stores them as DATETIME (always UTC) and DATE.
+
 type Player struct {
-	ID            int    `json:"id"`
-	Name          string `json:"name"`
-	Ping          int    `json:"ping"`
-	Status        string `json:"status"`
-	PlaytimeHours int    `json:"playtimeHours"`
-	Vehicle       string `json:"vehicle"`
-	LastSeen      string `json:"lastSeen"`
+	ID            int     `json:"id"`
+	Name          string  `json:"name"`
+	Ping          int     `json:"ping"`
+	Status        string  `json:"status"`
+	PlaytimeHours int     `json:"playtimeHours"`
+	Vehicle       string  `json:"vehicle"`
+	LastSeen      *string `json:"lastSeen"` // null = never seen
 }
 
 type ArrestRecord struct {
-	ID       int    `json:"id"`
-	PlayerID int    `json:"playerId"`
-	Charge   string `json:"charge"`
-	Officer  string `json:"officer"`
-	Date     string `json:"date"`
-	Status   string `json:"status"`
+	ID         int    `json:"id"`
+	PlayerID   int    `json:"playerId"`
+	PlayerName string `json:"playerName"` // filled in by the server; ignored on input
+	Charge     string `json:"charge"`
+	Officer    string `json:"officer"`
+	Date       string `json:"date"` // "" only for old rows whose date was unreadable
+	Status     string `json:"status"`
 }
 
 type Warrant struct {
 	ID         int    `json:"id"`
 	PlayerID   int    `json:"playerId"`
+	PlayerName string `json:"playerName"` // filled in by the server; ignored on input
 	Reason     string `json:"reason"`
 	IssuedBy   string `json:"issuedBy"`
-	DateIssued string `json:"dateIssued"`
+	DateIssued string `json:"dateIssued"` // "" only for old rows whose date was unreadable
 	Active     bool   `json:"active"`
 }
 
@@ -87,11 +92,32 @@ type Cache struct {
 	prefix string // empty in production; tests set a unique one
 }
 
+const defaultRedisURL = "redis://localhost:6379"
+
+// redisOptions reads where Redis lives from REDIS_URL:
+//
+//	redis://[user:password@]host:port[/db]    (rediss:// for TLS)
+//
+// Unset means a Redis on this machine, which is what local development uses.
+func redisOptions() *redis.Options {
+	raw := os.Getenv("REDIS_URL")
+	if raw == "" {
+		raw = defaultRedisURL
+	}
+	opt, err := redis.ParseURL(raw)
+	if err != nil {
+		// The URL can contain a password, so neither it nor the parser's
+		// message (which repeats it) goes into the log.
+		log.Fatal("REDIS_URL is not a valid Redis URL: expected redis://[user:password@]host:port[/db]")
+	}
+	// Lets a single call give up early through its context (the rate limiter
+	// does this). Calls without a deadline behave exactly as before.
+	opt.ContextTimeoutEnabled = true
+	return opt
+}
+
 func NewCache(ttl time.Duration) *Cache {
-	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
-	return &Cache{client: client, ttl: ttl}
+	return &Cache{client: redis.NewClient(redisOptions()), ttl: ttl}
 }
 
 func (c *Cache) versionKey(serverID int, resource string) string {
@@ -132,7 +158,13 @@ func (c *Cache) Invalidate(serverID int, resource string) {
 	}
 }
 
-var cache = NewCache(10 * time.Second)
+// How long a cached list page may be served before it is rebuilt.
+const cacheTTL = 10 * time.Second
+
+// Built here so the package always has a cache (tests replace it). main()
+// builds it again once server/.env is loaded, so a REDIS_URL set in that
+// file takes effect.
+var cache = NewCache(cacheTTL)
 
 // serveCachedList answers a list request from the cache, or builds it with
 // load(), caches it, and sends it.
@@ -163,63 +195,26 @@ func serveCachedList(w http.ResponseWriter, serverID int, resource, suffix strin
 	w.Write(data)
 }
 
-// ---------------------------------------------------------------------
-// Rate limiting
-// ---------------------------------------------------------------------
-
-type visitor struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
-}
-
-var (
-	visitors   = make(map[string]*visitor)
-	visitorsMu sync.Mutex
-)
-
-func getVisitor(ip string) *rate.Limiter {
-	visitorsMu.Lock()
-	defer visitorsMu.Unlock()
-
-	v, exists := visitors[ip]
-	if !exists {
-		limiter := rate.NewLimiter(5, 10)
-		visitors[ip] = &visitor{limiter: limiter, lastSeen: time.Now()}
-		return limiter
+// serveUncachedList builds a list with load() and sends it without caching.
+// Searches use it: almost every search text is different, so caching them
+// would fill Redis with pages nobody asks for twice.
+func serveUncachedList(w http.ResponseWriter, load func() (any, error)) {
+	result, err := load()
+	if err != nil {
+		serverError(w, err)
+		return
 	}
-	v.lastSeen = time.Now()
-	return v.limiter
-}
-
-func cleanupVisitors() {
-	for {
-		time.Sleep(time.Minute)
-		visitorsMu.Lock()
-		for ip, v := range visitors {
-			if time.Since(v.lastSeen) > 3*time.Minute {
-				delete(visitors, ip)
-			}
-		}
-		visitorsMu.Unlock()
+	data, err := json.Marshal(result)
+	if err != nil {
+		serverError(w, err)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Cache", "BYPASS")
+	w.Write(data)
 }
 
-func rateLimit(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr
-		}
-
-		limiter := getVisitor(ip)
-		if !limiter.Allow() {
-			http.Error(w, "Too many requests", http.StatusTooManyRequests)
-			return
-		}
-
-		h(w, r)
-	}
-}
+// (Rate limiting lives in ratelimit.go, the client's address in clientip.go.)
 
 // ---------------------------------------------------------------------
 // Auth (API keys for now; replaced by accounts + memberships later)
@@ -405,23 +400,31 @@ func initDB(dataSource string, migrate bool) {
 }
 
 func seed() {
-	players := []Player{
-		{0, "ShadowRunner", 34, "online", 142, "Adder", "Now"},
-		{0, "NightCrawler99", 87, "online", 58, "Zentorno", "Now"},
-		{0, "GhostDriver", 152, "idle", 301, "Sultan RS", "3 min ago"},
-		{0, "VendettaX", 41, "online", 89, "Kuruma", "Now"},
-		{0, "RustyWheels", 0, "offline", 12, "Blista", "2 hours ago"},
+	players := []struct {
+		name          string
+		ping          int
+		status        string
+		playtimeHours int
+		vehicle       string
+		minutesAgo    int // last seen this long before the moment of seeding
+	}{
+		{"ShadowRunner", 34, "online", 142, "Adder", 0},
+		{"NightCrawler99", 87, "online", 58, "Zentorno", 0},
+		{"GhostDriver", 152, "idle", 301, "Sultan RS", 3},
+		{"VendettaX", 41, "online", 89, "Kuruma", 0},
+		{"RustyWheels", 0, "offline", 12, "Blista", 120},
 	}
 	for _, p := range players {
-		db.Exec(`INSERT INTO players (server_id, name, ping, status, playtime_hours, vehicle, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			defaultServerID, p.Name, p.Ping, p.Status, p.PlaytimeHours, p.Vehicle, p.LastSeen)
+		db.Exec(`INSERT INTO players (server_id, name, ping, status, playtime_hours, vehicle, last_seen)
+			VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP() - INTERVAL ? MINUTE)`,
+			defaultServerID, p.name, p.ping, p.status, p.playtimeHours, p.vehicle, p.minutesAgo)
 	}
 
 	arrests := []ArrestRecord{
-		{0, 3, "Grand Theft Auto", "Officer Reyes", "2026-08-14", "convicted"},
-		{0, 3, "Evading Police", "Officer Reyes", "2026-08-14", "convicted"},
-		{0, 5, "Reckless Driving", "Officer Chen", "2026-08-20", "released"},
-		{0, 1, "Assault", "Officer Chen", "2026-08-25", "pending"},
+		{PlayerID: 3, Charge: "Grand Theft Auto", Officer: "Officer Reyes", Date: "2026-08-14", Status: "convicted"},
+		{PlayerID: 3, Charge: "Evading Police", Officer: "Officer Reyes", Date: "2026-08-14", Status: "convicted"},
+		{PlayerID: 5, Charge: "Reckless Driving", Officer: "Officer Chen", Date: "2026-08-20", Status: "released"},
+		{PlayerID: 1, Charge: "Assault", Officer: "Officer Chen", Date: "2026-08-25", Status: "pending"},
 	}
 	for _, a := range arrests {
 		db.Exec(`INSERT INTO arrests (server_id, player_id, charge, officer, date, status) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -429,9 +432,9 @@ func seed() {
 	}
 
 	warrants := []Warrant{
-		{0, 3, "Failure to appear in court", "Judge Alvarez", "2026-08-22", true},
-		{0, 4, "Outstanding fines", "Judge Alvarez", "2026-08-18", true},
-		{0, 5, "Probation violation", "Judge Kim", "2026-07-30", false},
+		{PlayerID: 3, Reason: "Failure to appear in court", IssuedBy: "Judge Alvarez", DateIssued: "2026-08-22", Active: true},
+		{PlayerID: 4, Reason: "Outstanding fines", IssuedBy: "Judge Alvarez", DateIssued: "2026-08-18", Active: true},
+		{PlayerID: 5, Reason: "Probation violation", IssuedBy: "Judge Kim", DateIssued: "2026-07-30", Active: false},
 	}
 	for _, w := range warrants {
 		db.Exec(`INSERT INTO warrants (server_id, player_id, reason, issued_by, date_issued, active) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -457,6 +460,8 @@ func withCORS(h http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-Requested-With")
+		// Lets the frontend read how long a rate-limited (429) request should wait.
+		w.Header().Set("Access-Control-Expose-Headers", "Retry-After")
 		w.Header().Add("Vary", "Origin")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -479,6 +484,57 @@ func paging(r *http.Request, defaultLimit int) (limit, offset int) {
 		}
 	}
 	return limit, offset
+}
+
+// The longest search text the API looks at; anything longer is cut off.
+const maxSearchLength = 100
+
+// searchTerm returns the trimmed ?q= text, or "" when nothing is searched.
+func searchTerm(r *http.Request) string {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if runes := []rune(q); len(runes) > maxSearchLength {
+		q = strings.TrimSpace(string(runes[:maxSearchLength]))
+	}
+	return q
+}
+
+// likeEscaper makes user text safe inside a LIKE pattern. Without it a
+// search for "50%" or "a_b" would treat % and _ as wildcards. The queries
+// name "!" as the escape character themselves (ESCAPE '!'), so this does
+// not depend on how the database server treats backslashes.
+var likeEscaper = strings.NewReplacer("!", "!!", "%", "!%", "_", "!_")
+
+// containsPattern turns search text into a LIKE pattern meaning "contains".
+func containsPattern(q string) string {
+	return "%" + likeEscaper.Replace(q) + "%"
+}
+
+const dateLayout = "2006-01-02"
+
+// normalizeDate checks a calendar day sent by a client, e.g. "2026-11-16".
+// Empty means today (UTC). ok is false for anything that is not a real day.
+func normalizeDate(s string) (date string, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Now().UTC().Format(dateLayout), true
+	}
+	t, err := time.Parse(dateLayout, s)
+	if err != nil || t.Year() < 1000 { // MySQL's DATE starts at year 1000
+		return "", false
+	}
+	return t.Format(dateLayout), true
+}
+
+// badDate is the 400 message for a date field that normalizeDate rejected.
+func badDate(field string) string {
+	return field + " must be a calendar day like 2026-01-31"
+}
+
+// playerName looks up a player's name on one server ("" if there is none).
+func playerName(serverID, playerID int) string {
+	var name string
+	db.QueryRow(`SELECT name FROM players WHERE id = ? AND server_id = ?`, playerID, serverID).Scan(&name)
+	return name
 }
 
 func validateArrest(a ArrestRecord) string {
@@ -529,7 +585,8 @@ func playersHandler(w http.ResponseWriter, r *http.Request) {
 	limit, offset := paging(r, 50)
 
 	serveCachedList(w, serverID, "players", fmt.Sprintf("%d:%d", limit, offset), func() (any, error) {
-		rows, err := db.Query(`SELECT id, name, ping, status, playtime_hours, vehicle, last_seen
+		rows, err := db.Query(`SELECT id, name, ping, status, playtime_hours, vehicle,
+				DATE_FORMAT(last_seen, '%Y-%m-%dT%H:%i:%sZ')
 			FROM players WHERE server_id = ? ORDER BY id LIMIT ? OFFSET ?`, serverID, limit, offset)
 		if err != nil {
 			return nil, err
@@ -558,10 +615,24 @@ func arrestsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		limit, offset := paging(r, 50)
+		q := searchTerm(r) // matches player name, charge or officer
 
-		serveCachedList(w, serverID, "arrests", fmt.Sprintf("%d:%d", limit, offset), func() (any, error) {
-			rows, err := db.Query(`SELECT id, player_id, charge, officer, date, status
-				FROM arrests WHERE server_id = ? ORDER BY id LIMIT ? OFFSET ?`, serverID, limit, offset)
+		load := func() (any, error) {
+			query := `SELECT a.id, a.player_id, COALESCE(p.name, ''), a.charge, a.officer,
+					COALESCE(DATE_FORMAT(a.date, '%Y-%m-%d'), ''), a.status
+				FROM arrests a
+				LEFT JOIN players p ON p.id = a.player_id AND p.server_id = a.server_id
+				WHERE a.server_id = ?`
+			args := []any{serverID}
+			if q != "" {
+				query += ` AND (p.name LIKE ? ESCAPE '!' OR a.charge LIKE ? ESCAPE '!' OR a.officer LIKE ? ESCAPE '!')`
+				pattern := containsPattern(q)
+				args = append(args, pattern, pattern, pattern)
+			}
+			query += ` ORDER BY a.id LIMIT ? OFFSET ?`
+			args = append(args, limit, offset)
+
+			rows, err := db.Query(query, args...)
 			if err != nil {
 				return nil, err
 			}
@@ -570,13 +641,19 @@ func arrestsHandler(w http.ResponseWriter, r *http.Request) {
 			arrests := []ArrestRecord{}
 			for rows.Next() {
 				var a ArrestRecord
-				if err := rows.Scan(&a.ID, &a.PlayerID, &a.Charge, &a.Officer, &a.Date, &a.Status); err != nil {
+				if err := rows.Scan(&a.ID, &a.PlayerID, &a.PlayerName, &a.Charge, &a.Officer, &a.Date, &a.Status); err != nil {
 					return nil, err
 				}
 				arrests = append(arrests, a)
 			}
 			return arrests, rows.Err()
-		})
+		}
+
+		if q != "" {
+			serveUncachedList(w, load)
+		} else {
+			serveCachedList(w, serverID, "arrests", fmt.Sprintf("%d:%d", limit, offset), load)
+		}
 
 	case "POST":
 		if !can(r, permArrestsCreate) {
@@ -593,6 +670,12 @@ func arrestsHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, msg, http.StatusBadRequest)
 			return
 		}
+		date, ok := normalizeDate(a.Date)
+		if !ok {
+			http.Error(w, badDate("date"), http.StatusBadRequest)
+			return
+		}
+		a.Date = date
 
 		result, err := db.Exec(`INSERT INTO arrests (server_id, player_id, charge, officer, date, status) VALUES (?, ?, ?, ?, ?, ?)`,
 			serverID, a.PlayerID, a.Charge, a.Officer, a.Date, a.Status)
@@ -607,6 +690,7 @@ func arrestsHandler(w http.ResponseWriter, r *http.Request) {
 
 		id, _ := result.LastInsertId()
 		a.ID = int(id)
+		a.PlayerName = playerName(serverID, a.PlayerID)
 
 		cache.Invalidate(serverID, "arrests")
 
@@ -629,10 +713,24 @@ func warrantsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		limit, offset := paging(r, 50)
+		q := searchTerm(r) // matches player name, reason or who issued it
 
-		serveCachedList(w, serverID, "warrants", fmt.Sprintf("%d:%d", limit, offset), func() (any, error) {
-			rows, err := db.Query(`SELECT id, player_id, reason, issued_by, date_issued, active
-				FROM warrants WHERE server_id = ? ORDER BY id LIMIT ? OFFSET ?`, serverID, limit, offset)
+		load := func() (any, error) {
+			query := `SELECT w.id, w.player_id, COALESCE(p.name, ''), w.reason, w.issued_by,
+					COALESCE(DATE_FORMAT(w.date_issued, '%Y-%m-%d'), ''), w.active
+				FROM warrants w
+				LEFT JOIN players p ON p.id = w.player_id AND p.server_id = w.server_id
+				WHERE w.server_id = ?`
+			args := []any{serverID}
+			if q != "" {
+				query += ` AND (p.name LIKE ? ESCAPE '!' OR w.reason LIKE ? ESCAPE '!' OR w.issued_by LIKE ? ESCAPE '!')`
+				pattern := containsPattern(q)
+				args = append(args, pattern, pattern, pattern)
+			}
+			query += ` ORDER BY w.id LIMIT ? OFFSET ?`
+			args = append(args, limit, offset)
+
+			rows, err := db.Query(query, args...)
 			if err != nil {
 				return nil, err
 			}
@@ -641,13 +739,19 @@ func warrantsHandler(w http.ResponseWriter, r *http.Request) {
 			warrants := []Warrant{}
 			for rows.Next() {
 				var wRow Warrant
-				if err := rows.Scan(&wRow.ID, &wRow.PlayerID, &wRow.Reason, &wRow.IssuedBy, &wRow.DateIssued, &wRow.Active); err != nil {
+				if err := rows.Scan(&wRow.ID, &wRow.PlayerID, &wRow.PlayerName, &wRow.Reason, &wRow.IssuedBy, &wRow.DateIssued, &wRow.Active); err != nil {
 					return nil, err
 				}
 				warrants = append(warrants, wRow)
 			}
 			return warrants, rows.Err()
-		})
+		}
+
+		if q != "" {
+			serveUncachedList(w, load)
+		} else {
+			serveCachedList(w, serverID, "warrants", fmt.Sprintf("%d:%d", limit, offset), load)
+		}
 
 	case "POST":
 		if !can(r, permWarrantsIssue) {
@@ -665,6 +769,12 @@ func warrantsHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, msg, http.StatusBadRequest)
 			return
 		}
+		date, ok := normalizeDate(newWarrant.DateIssued)
+		if !ok {
+			http.Error(w, badDate("dateIssued"), http.StatusBadRequest)
+			return
+		}
+		newWarrant.DateIssued = date
 
 		result, err := db.Exec(`INSERT INTO warrants (server_id, player_id, reason, issued_by, date_issued, active) VALUES (?, ?, ?, ?, ?, ?)`,
 			serverID, newWarrant.PlayerID, newWarrant.Reason, newWarrant.IssuedBy, newWarrant.DateIssued, newWarrant.Active)
@@ -679,6 +789,7 @@ func warrantsHandler(w http.ResponseWriter, r *http.Request) {
 
 		id, _ := result.LastInsertId()
 		newWarrant.ID = int(id)
+		newWarrant.PlayerName = playerName(serverID, newWarrant.PlayerID)
 
 		cache.Invalidate(serverID, "warrants")
 
@@ -726,10 +837,12 @@ func auditLogHandler(w http.ResponseWriter, r *http.Request) {
 		var rows *sql.Rows
 		var err error
 		if beforeID > 0 {
-			rows, err = db.Query(`SELECT id, timestamp, role, actor, method, path, ip FROM audit_log
+			rows, err = db.Query(`SELECT id, DATE_FORMAT(timestamp, '%Y-%m-%dT%H:%i:%sZ'), role, actor, method, path, ip
+				FROM audit_log
 				WHERE server_id = ? AND id < ? ORDER BY id DESC LIMIT ?`, serverID, beforeID, limit)
 		} else {
-			rows, err = db.Query(`SELECT id, timestamp, role, actor, method, path, ip FROM audit_log
+			rows, err = db.Query(`SELECT id, DATE_FORMAT(timestamp, '%Y-%m-%dT%H:%i:%sZ'), role, actor, method, path, ip
+				FROM audit_log
 				WHERE server_id = ? ORDER BY id DESC LIMIT ?`, serverID, limit)
 		}
 		if err != nil {
@@ -975,13 +1088,12 @@ func logAudit(r *http.Request) {
 	if actor == "" {
 		actor = "api key"
 	}
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		ip = r.RemoteAddr
-	}
-	_, err = db.Exec(
-		`INSERT INTO audit_log (server_id, timestamp, role, actor, method, path, ip) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		serverID, time.Now().Format(time.RFC3339), roleName(id.Role), actor, r.Method, r.URL.Path, ip,
+	// clientIP, not r.RemoteAddr: behind the load balancer the latter is
+	// always the balancer. The time is the database's own UTC clock, so
+	// entries from different API instances share one clock.
+	_, err := db.Exec(
+		`INSERT INTO audit_log (server_id, timestamp, role, actor, method, path, ip) VALUES (?, UTC_TIMESTAMP(), ?, ?, ?, ?, ?)`,
+		serverID, roleName(id.Role), actor, r.Method, r.URL.Path, clientIP(r),
 	)
 	if err != nil {
 		log.Printf("audit log failed: %v", err)
@@ -1017,6 +1129,11 @@ func whoamiHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	godotenv.Load()
+
+	// These read server/.env, so they have to come after it is loaded.
+	cache.client.Close()
+	cache = NewCache(cacheTTL) // REDIS_URL
+	loadTrustedProxies()       // TRUSTED_PROXIES
 
 	// API keys come from the environment only. An unset key switches that role
 	// off: there are no built-in defaults, because this repository is public.
@@ -1076,6 +1193,20 @@ func main() {
 	srv := &http.Server{
 		Addr:    ":" + port,
 		Handler: nil,
+
+		// Without limits, a client can keep a connection (and the goroutine
+		// serving it) busy forever by sending its request a few bytes at a
+		// time. Each phase of a request now has a deadline.
+		ReadHeaderTimeout: 5 * time.Second,  // request line and headers
+		ReadTimeout:       15 * time.Second, // headers plus body
+		// From the end of the headers to the end of the response. Must stay
+		// above the slowest handler: the Discord callback can wait on two
+		// outbound calls of up to 10s each.
+		WriteTimeout: 30 * time.Second,
+		// How long an idle keep-alive connection is kept. Must stay ABOVE the
+		// load balancer's own idle timeout (90s in server/lb), or the balancer
+		// can reuse a connection at the moment this side closes it.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	go func() {

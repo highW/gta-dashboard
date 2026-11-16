@@ -107,14 +107,30 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	godotenv.Load("../.env")
 
+	// One connection pool to the API instances, with deadlines. The default
+	// would wait forever for an instance that accepted a request and then
+	// stopped responding.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Longer than the API's own WriteTimeout (30s), so a slow but working
+	// request is never cut short here; a stuck instance turns into a 502.
+	transport.ResponseHeaderTimeout = 35 * time.Second
+	// Must stay BELOW the API's IdleTimeout (120s): this side has to drop an
+	// idle connection first, or it could reuse one the API is just closing.
+	transport.IdleConnTimeout = 90 * time.Second
+
 	for _, raw := range backendURLs {
 		target, err := url.Parse(raw)
 		if err != nil {
 			log.Fatal(err)
 		}
+		// The proxy appends the caller's address to X-Forwarded-For on every
+		// request; the API uses it to rate limit and audit the real client
+		// (see clientIP in ../clientip.go).
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		proxy.Transport = transport
 		backends = append(backends, &Backend{
 			URL:   target,
-			Proxy: httputil.NewSingleHostReverseProxy(target),
+			Proxy: proxy,
 		})
 	}
 
@@ -127,6 +143,15 @@ func main() {
 	srv := &http.Server{
 		Addr:    ":9000",
 		Handler: mux,
+
+		// Deadlines for each phase of a request, so a client that sends or
+		// reads a few bytes at a time cannot hold connections open forever.
+		// WriteTimeout covers the wait for the API instance too, so it sits
+		// above the 35s the transport allows.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      40 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

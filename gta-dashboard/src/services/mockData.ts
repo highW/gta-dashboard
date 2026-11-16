@@ -7,7 +7,8 @@ export interface Player {
   status: "online" | "idle" | "offline";
   playtimeHours: number;
   vehicle: string;
-  lastSeen: string;
+  /** UTC time, e.g. "2026-11-16T21:04:05Z"; null if the player was never seen. */
+  lastSeen: string | null;
 }
 
 export const mockPlayers: Player[] = [
@@ -33,6 +34,7 @@ export function fetchMockPlayers(): Promise<Player[]> {
 
 export interface AuditEntry {
   id: number;
+  /** UTC time, e.g. "2026-11-16T21:04:05Z". */
   timestamp: string;
   role: string;
   actor: string;
@@ -55,8 +57,11 @@ export function fetchAuditLog(beforeId?: number): Promise<AuditLogResponse> {
 export interface ArrestRecord {
   id: number;
   playerId: number;
+  /** Filled in by the server. */
+  playerName: string;
   charge: string;
   officer: string;
+  /** Calendar day, "2026-08-14". Empty only for old records with no readable date. */
   date: string;
   status: "convicted" | "released" | "pending";
 }
@@ -64,23 +69,26 @@ export interface ArrestRecord {
 export interface Warrant {
   id: number;
   playerId: number;
+  /** Filled in by the server. */
+  playerName: string;
   reason: string;
   issuedBy: string;
+  /** Calendar day, "2026-08-14". Empty only for old records with no readable date. */
   dateIssued: string;
   active: boolean;
 }
 
 export const mockArrestRecords: ArrestRecord[] = [
-  { id: 1, playerId: 3, charge: "Grand Theft Auto", officer: "Officer Reyes", date: "2026-08-14", status: "convicted" },
-  { id: 2, playerId: 3, charge: "Evading Police", officer: "Officer Reyes", date: "2026-08-14", status: "convicted" },
-  { id: 3, playerId: 5, charge: "Reckless Driving", officer: "Officer Chen", date: "2026-08-20", status: "released" },
-  { id: 4, playerId: 1, charge: "Assault", officer: "Officer Chen", date: "2026-08-25", status: "pending" },
+  { id: 1, playerId: 3, playerName: "GhostDriver", charge: "Grand Theft Auto", officer: "Officer Reyes", date: "2026-08-14", status: "convicted" },
+  { id: 2, playerId: 3, playerName: "GhostDriver", charge: "Evading Police", officer: "Officer Reyes", date: "2026-08-14", status: "convicted" },
+  { id: 3, playerId: 5, playerName: "RustyWheels", charge: "Reckless Driving", officer: "Officer Chen", date: "2026-08-20", status: "released" },
+  { id: 4, playerId: 1, playerName: "ShadowRunner", charge: "Assault", officer: "Officer Chen", date: "2026-08-25", status: "pending" },
 ];
 
 export const mockWarrants: Warrant[] = [
-  { id: 1, playerId: 3, reason: "Failure to appear in court", issuedBy: "Judge Alvarez", dateIssued: "2026-08-22", active: true },
-  { id: 2, playerId: 4, reason: "Outstanding fines", issuedBy: "Judge Alvarez", dateIssued: "2026-08-18", active: true },
-  { id: 3, playerId: 5, reason: "Probation violation", issuedBy: "Judge Kim", dateIssued: "2026-07-30", active: false },
+  { id: 1, playerId: 3, playerName: "GhostDriver", reason: "Failure to appear in court", issuedBy: "Judge Alvarez", dateIssued: "2026-08-22", active: true },
+  { id: 2, playerId: 4, playerName: "VendettaX", reason: "Outstanding fines", issuedBy: "Judge Alvarez", dateIssued: "2026-08-18", active: true },
+  { id: 3, playerId: 5, playerName: "RustyWheels", reason: "Probation violation", issuedBy: "Judge Kim", dateIssued: "2026-07-30", active: false },
 ];
 
 export function fetchMockRecords(): Promise<{ arrests: ArrestRecord[]; warrants: Warrant[] }> {
@@ -93,19 +101,25 @@ export function fetchPlayers(): Promise<Player[]> {
   return api.get("/players").then((res)=>res.data);
 }
 
-export function fetchArrests(): Promise<ArrestRecord[]>{
-  return api.get("/arrests").then((res)=>res.data);
+// Search is done by the server, across ALL records (player name, charge or
+// reason, officer or judge), not just the page that happens to be loaded.
+function searchParams(search?: string) {
+  return search ? { params: { q: search } } : undefined;
 }
 
-export function fetchWarrants(): Promise<Warrant[]>{
-  return api.get("/warrants").then((res)=>res.data);
+export function fetchArrests(search?: string): Promise<ArrestRecord[]>{
+  return api.get("/arrests", searchParams(search)).then((res)=>res.data);
 }
 
-export function createArrest(arrest: Omit<ArrestRecord,"id">): Promise < ArrestRecord > {
+export function fetchWarrants(search?: string): Promise<Warrant[]>{
+  return api.get("/warrants", searchParams(search)).then((res)=>res.data);
+}
+
+export function createArrest(arrest: Omit<ArrestRecord,"id" | "playerName">): Promise < ArrestRecord > {
   return api.post("/arrests", arrest).then((res) => res.data);
 }
 
-export function createWarrant(warrant: Omit<Warrant, "id" | "active">): Promise < Warrant > {
+export function createWarrant(warrant: Omit<Warrant, "id" | "active" | "playerName">): Promise < Warrant > {
   return api.post("/warrants", warrant).then((res) => res.data);
 }
 

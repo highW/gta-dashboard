@@ -1,10 +1,16 @@
 -- schema.sql: full multi-tenant schema for FRESH installs and tests.
--- Existing databases were upgraded with migrations/001_multi_tenant.sql;
+-- Existing databases are upgraded with the files in migrations/ (001 to 004);
 -- every statement here is IF NOT EXISTS / INSERT IGNORE, so running it on
 -- an already-migrated database changes nothing.
 --
 -- server_id has no DEFAULT here on purpose: a query that forgets it fails
 -- loudly instead of silently landing in server 1.
+--
+-- Dates and times: audit_log.timestamp and players.last_seen are written by
+-- the API as UTC (UTC_TIMESTAMP()), whatever time zone the database runs in.
+-- The created_at / updated_at / last_login_at columns use the database's own
+-- clock, which is UTC in the stock MySQL container. DATE columns hold a plain
+-- calendar day.
 
 CREATE TABLE IF NOT EXISTS servers (
   id                  INT AUTO_INCREMENT PRIMARY KEY,
@@ -32,7 +38,7 @@ CREATE TABLE IF NOT EXISTS players (
   status         VARCHAR(255) NOT NULL,
   playtime_hours INT NOT NULL,
   vehicle        VARCHAR(255) NOT NULL,
-  last_seen      VARCHAR(255) NOT NULL,
+  last_seen      DATETIME NULL,          -- UTC; NULL = never seen
   UNIQUE KEY uq_players_id_server (id, server_id),
   KEY idx_players_server_name (server_id, name),
   CONSTRAINT fk_players_server FOREIGN KEY (server_id) REFERENCES servers(id)
@@ -44,7 +50,8 @@ CREATE TABLE IF NOT EXISTS arrests (
   player_id INT NOT NULL,
   charge    VARCHAR(255) NOT NULL,
   officer   VARCHAR(255) NOT NULL,
-  date      VARCHAR(255) NOT NULL,
+  date      DATE NULL,                   -- the API always sets it; NULL only for
+                                         -- old rows whose text date was unreadable
   status    VARCHAR(255) NOT NULL,
   KEY idx_arrests_server (server_id),
   KEY idx_arrests_player_server (player_id, server_id),
@@ -58,7 +65,7 @@ CREATE TABLE IF NOT EXISTS warrants (
   player_id   INT NOT NULL,
   reason      VARCHAR(255) NOT NULL,
   issued_by   VARCHAR(255) NOT NULL,
-  date_issued VARCHAR(255) NOT NULL,
+  date_issued DATE NULL,                 -- same rule as arrests.date
   active      TINYINT(1) NOT NULL,
   KEY idx_warrants_server_active (server_id, active),
   KEY idx_warrants_player_server (player_id, server_id),
@@ -69,7 +76,7 @@ CREATE TABLE IF NOT EXISTS warrants (
 CREATE TABLE IF NOT EXISTS audit_log (
   id        INT AUTO_INCREMENT PRIMARY KEY,
   server_id INT NOT NULL,
-  timestamp VARCHAR(255) NOT NULL,
+  timestamp DATETIME NOT NULL,           -- UTC
   role      VARCHAR(255) NOT NULL,
   actor     VARCHAR(100) NOT NULL DEFAULT '',
   method    VARCHAR(255) NOT NULL,

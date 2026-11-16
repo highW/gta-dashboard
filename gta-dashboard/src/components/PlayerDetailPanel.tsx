@@ -1,12 +1,18 @@
 import type { Player } from "../services/mockData";
 import { deletePlayer } from "../services/mockData";
 import { useAuth } from "../context/AuthContext";
+import { timeAgo } from "../utils/time";
 
 const statusColor: Record<Player["status"], string> = {
     online: "bg-green-500",
     idle: "bg-yellow-500",
     offline: "bg-gray-500",
 };
+
+function lastSeenText(player: Player): string {
+    if (player.status === "online") return "Online now";
+    return player.lastSeen ? timeAgo(player.lastSeen) : "Never";
+}
 
 export default function PlayerDetailPanel({
     player,
@@ -53,7 +59,7 @@ export default function PlayerDetailPanel({
                     <DetailRow label="Ping" value={`${player.ping} ms`} />
                     <DetailRow label="Playtime" value={`${player.playtimeHours} hrs`} />
                     <DetailRow label="Current vehicle" value={player.vehicle} />
-                    <DetailRow label="Last seen" value={player.lastSeen} />
+                    <DetailRow label="Last seen" value={lastSeenText(player)} />
                 </div>
             {can("players.delete") && (
                 <button

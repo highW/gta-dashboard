@@ -22,7 +22,8 @@ import (
 //   TEST_MYSQL_DSN=user:pass@tcp(localhost:3306)/dashboard_test
 //
 // The database name MUST end in _test: every table in it is dropped
-// before each test. Redis must be running on localhost:6379.
+// before each test. Redis must be running on localhost:6379 (or wherever
+// REDIS_URL points).
 // ---------------------------------------------------------------------
 
 func setupTestDB(t *testing.T) {
@@ -96,7 +97,7 @@ func addServer(t *testing.T, slug string) int {
 func addPlayer(t *testing.T, serverID int, name string) int {
 	t.Helper()
 	res, err := db.Exec(`INSERT INTO players (server_id, name, ping, status, playtime_hours, vehicle, last_seen)
-		VALUES (?, ?, 0, 'online', 0, 'None', 'Now')`, serverID, name)
+		VALUES (?, ?, 0, 'online', 0, 'None', UTC_TIMESTAMP())`, serverID, name)
 	if err != nil {
 		t.Fatalf("add player: %v", err)
 	}

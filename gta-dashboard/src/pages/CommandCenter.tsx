@@ -5,14 +5,7 @@ import { useAuth } from "../context/AuthContext";
 import { visibleNav } from "../config/nav";
 import { fetchStats, fetchAuditLog } from "../services/mockData";
 import type { Stats, AuditEntry } from "../services/mockData";
-
-function timeAgo(ts: string | number | Date): string {
-  const secs = Math.max(0, (Date.now() - new Date(ts).getTime()) / 1000);
-  if (secs < 60) return "just now";
-  if (secs < 3600) return `${Math.floor(secs / 60)} min ago`;
-  if (secs < 86400) return `${Math.floor(secs / 3600)} h ago`;
-  return `${Math.floor(secs / 86400)} d ago`;
-}
+import { timeAgo } from "../utils/time";
 
 const VERBS: Record<string, string> = {
   POST: "Created",

@@ -38,8 +38,16 @@ Edit `server/.env`:
 - at least one way to sign in: an API key such as `ADMIN_KEY` (use 24+ random
   characters), or Discord login (`DISCORD_*` and `BOOTSTRAP_ADMIN_DISCORD_ID`).
   A key you leave empty switches that role off.
+- optional: `REDIS_URL` when Redis runs on another machine, and
+  `TRUSTED_PROXIES` when the load balancer does (both are explained in
+  `.env.example`).
 
 There are no built-in default keys or passwords. Never commit `.env`.
+
+Already have a database from an earlier version? A new database needs nothing
+extra, but an existing one has to be brought up to date with the newer files
+in `server/migrations/`, in order. Each file's header says what it does and
+how to run it safely.
 
 **3. Frontend**
 
