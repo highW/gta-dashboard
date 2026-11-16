@@ -363,12 +363,15 @@ func requireAuth(h http.HandlerFunc) http.HandlerFunc {
 // Database
 // ---------------------------------------------------------------------
 
-func initDB(dataSource string) {
+func initDB(dataSource string, migrate bool) {
 	cfg, err := mysql.ParseDSN(dataSource)
 	if err != nil {
 		log.Fatal(err)
 	}
-	cfg.MultiStatements = true // schema.sql holds several statements
+	// Only the migration path needs several statements per Exec. The running
+	// app never does, so leaving this off stops a SQL injection from chaining
+	// a second statement.
+	cfg.MultiStatements = migrate
 	// RowsAffected reports rows *matched*, not just rows changed, so applying
 	// the same value twice (e.g. clearing an already-cleared warrant) is not
 	// mistaken for "not found".
@@ -380,12 +383,18 @@ func initDB(dataSource string) {
 	}
 	db = sql.OpenDB(connector)
 
-	schema, err := os.ReadFile("schema.sql")
-	if err != nil {
+	if err := db.Ping(); err != nil {
 		log.Fatal(err)
 	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		log.Fatal(err)
+
+	if migrate {
+		schema, err := os.ReadFile("schema.sql")
+		if err != nil {
+			log.Fatal(err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	var count int
@@ -1036,7 +1045,7 @@ func main() {
 	if mysqlDSN == "" {
 		log.Fatal("MYSQL_DSN is not set: copy server/.env.example to server/.env and fill it in")
 	}
-	initDB(mysqlDSN)
+	initDB(mysqlDSN, false)
 
 	go cleanupVisitors()
 

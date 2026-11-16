@@ -42,7 +42,7 @@ func setupTestDB(t *testing.T) {
 
 	resetTestTables(t, dsn)
 
-	initDB(dsn) // creates tables from schema.sql and seeds server 1
+	initDB(dsn, true) // creates tables from schema.sql and seeds server 1
 	t.Cleanup(func() { db.Close() })
 
 	adminKey = "test-admin-key"
