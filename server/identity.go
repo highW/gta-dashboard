@@ -45,6 +45,10 @@ func roleFromName(name string) role {
 		return roleAdmin
 	case "judge":
 		return roleJudge
+	case "prosecutor":
+		return roleProsecutor
+	case "supervisor":
+		return roleSupervisor
 	case "police":
 		return rolePolice
 	case "viewer":

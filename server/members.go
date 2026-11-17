@@ -100,7 +100,7 @@ func memberByIDHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	remove := body.Role == "none"
 	if !remove && roleFromName(body.Role) == roleNone {
-		http.Error(w, "role must be admin, judge, police, viewer or none", http.StatusBadRequest)
+		http.Error(w, "role must be admin, judge, prosecutor, supervisor, police, viewer or none", http.StatusBadRequest)
 		return
 	}
 

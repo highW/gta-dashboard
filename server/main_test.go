@@ -49,6 +49,8 @@ func setupTestDB(t *testing.T) {
 	adminKey = "test-admin-key"
 	viewerKey = "test-viewer-key"
 	policeKey = "test-police-key"
+	supervisorKey = "test-supervisor-key"
+	prosecutorKey = "test-prosecutor-key"
 	judgeKey = "test-judge-key"
 	bootstrapAdminDiscordID = ""
 	frontendURL = "http://localhost:5173"
@@ -496,10 +498,32 @@ func TestRolePermissions(t *testing.T) {
 	setupTestDB(t)
 
 	keys := map[string]string{
-		"none": "", "viewer": viewerKey, "police": policeKey, "judge": judgeKey, "admin": adminKey,
+		"none": "", "viewer": viewerKey, "police": policeKey, "supervisor": supervisorKey,
+		"prosecutor": prosecutorKey, "judge": judgeKey, "admin": adminKey,
 	}
-	roleOrder := []string{"none", "viewer", "police", "judge", "admin"}
-	everyone := []string{"viewer", "police", "judge", "admin"}
+	roleOrder := []string{"none", "viewer", "police", "supervisor", "prosecutor", "judge", "admin"}
+	everyone := []string{"viewer", "police", "supervisor", "prosecutor", "judge", "admin"}
+
+	// A fresh warrant request / arrest for each attempt, so one role's
+	// action doesn't change what the next role finds.
+	newRequest := func() string {
+		res, err := db.Exec(`INSERT INTO warrants (server_id, player_id, reason, issued_by, date_issued, status)
+			VALUES (1, 1, 'req', 'Officer T', '2026-10-11', 'requested')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return fmt.Sprint(id)
+	}
+	newArrest := func() string {
+		res, err := db.Exec(`INSERT INTO arrests (server_id, player_id, charge, officer, date, status)
+			VALUES (1, 1, 'x', 'Officer T', '2026-10-11', 'pending')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return fmt.Sprint(id)
+	}
 
 	idReq := func(method, path, id string, body any, key string) *http.Request {
 		req := newReq(method, path, body, key)
@@ -524,19 +548,32 @@ func TestRolePermissions(t *testing.T) {
 		{"read stats", everyone, func(k string) int {
 			return call(requireAuth(statsHandler), newReq("GET", "/api/stats", nil, k))
 		}},
-		{"read audit log", []string{"admin"}, func(k string) int {
+		{"read audit log", []string{"supervisor", "admin"}, func(k string) int {
 			return call(requireAuth(auditLogHandler), newReq("GET", "/api/audit-log", nil, k))
 		}},
-		{"create arrest", []string{"police", "admin"}, func(k string) int {
+		{"create arrest", []string{"police", "supervisor", "admin"}, func(k string) int {
 			body := ArrestRecord{PlayerID: 1, Charge: "x", Officer: "y", Date: "2026-10-11", Status: "pending"}
 			return call(requireAuth(arrestsHandler), newReq("POST", "/api/arrests", body, k))
 		}},
-		{"update arrest", []string{"police", "admin"}, func(k string) int {
-			return call(requireAuth(arrestByIDHandler), idReq("PATCH", "/api/arrests/1", "1", map[string]string{"status": "pending"}, k))
+		{"decide an arrest (convicted)", []string{"prosecutor", "admin"}, func(k string) int {
+			id := newArrest()
+			return call(requireAuth(arrestByIDHandler), idReq("PATCH", "/api/arrests/"+id, id, map[string]string{"status": "convicted"}, k))
 		}},
-		{"issue warrant", []string{"judge", "admin"}, func(k string) int {
+		{"void an arrest", []string{"supervisor", "admin"}, func(k string) int {
+			id := newArrest()
+			return call(requireAuth(arrestByIDHandler), idReq("PATCH", "/api/arrests/"+id, id, map[string]string{"status": "voided"}, k))
+		}},
+		{"create a warrant (request or issue)", []string{"police", "supervisor", "prosecutor", "judge", "admin"}, func(k string) int {
 			body := Warrant{PlayerID: 1, Reason: "r", IssuedBy: "i", DateIssued: "2026-10-11"}
 			return call(requireAuth(warrantsHandler), newReq("POST", "/api/warrants", body, k))
+		}},
+		{"approve a warrant request", []string{"judge", "admin"}, func(k string) int {
+			id := newRequest()
+			return call(requireAuth(warrantByIDHandler), idReq("PATCH", "/api/warrants/"+id, id, map[string]string{"action": "approve"}, k))
+		}},
+		{"deny a warrant request", []string{"judge", "admin"}, func(k string) int {
+			id := newRequest()
+			return call(requireAuth(warrantByIDHandler), idReq("PATCH", "/api/warrants/"+id, id, map[string]string{"action": "deny"}, k))
 		}},
 		{"clear warrant", []string{"judge", "admin"}, func(k string) int {
 			return call(requireAuth(warrantByIDHandler), idReq("PATCH", "/api/warrants/1", "1", map[string]bool{"active": false}, k))
@@ -584,6 +621,7 @@ func TestRolePermissions(t *testing.T) {
 // including with an empty or arbitrary header.
 func TestUnsetKeysDisableRole(t *testing.T) {
 	adminKey, viewerKey, policeKey, judgeKey = "", "", "", ""
+	supervisorKey, prosecutorKey = "", ""
 
 	for _, key := range []string{"", "anything", "test-police-key"} {
 		if got := getRole(newReq("GET", "/api/players", nil, key)); got != roleNone {

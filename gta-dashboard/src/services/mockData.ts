@@ -1,4 +1,5 @@
-import api from "./api"
+import axios from "axios";
+import api from "./api";
 
 export interface Player {
   id: number;
@@ -63,8 +64,15 @@ export interface ArrestRecord {
   officer: string;
   /** Calendar day, "2026-08-14". Empty only for old records with no readable date. */
   date: string;
-  status: "convicted" | "released" | "pending";
+  /** "voided" = struck by a supervisor as made in error; it never changes again. */
+  status: "pending" | "convicted" | "released" | "voided";
 }
+
+/**
+ * requested: waiting for a judge. active: approved or issued by a judge.
+ * denied: a judge refused the request. cleared: was active, now lifted.
+ */
+export type WarrantStatus = "requested" | "active" | "denied" | "cleared";
 
 export interface Warrant {
   id: number;
@@ -75,7 +83,14 @@ export interface Warrant {
   issuedBy: string;
   /** Calendar day, "2026-08-14". Empty only for old records with no readable date. */
   dateIssued: string;
+  status: WarrantStatus;
+  /** status === "active" */
   active: boolean;
+  /** The account that approved or denied the request. */
+  decidedBy: string | null;
+  /** UTC time of that decision. */
+  decidedAt: string | null;
+  decisionNote: string | null;
 }
 
 export const mockArrestRecords: ArrestRecord[] = [
@@ -85,10 +100,12 @@ export const mockArrestRecords: ArrestRecord[] = [
   { id: 4, playerId: 1, playerName: "ShadowRunner", charge: "Assault", officer: "Officer Chen", date: "2026-08-25", status: "pending" },
 ];
 
+const undecided = { decidedBy: null, decidedAt: null, decisionNote: null };
+
 export const mockWarrants: Warrant[] = [
-  { id: 1, playerId: 3, playerName: "GhostDriver", reason: "Failure to appear in court", issuedBy: "Judge Alvarez", dateIssued: "2026-08-22", active: true },
-  { id: 2, playerId: 4, playerName: "VendettaX", reason: "Outstanding fines", issuedBy: "Judge Alvarez", dateIssued: "2026-08-18", active: true },
-  { id: 3, playerId: 5, playerName: "RustyWheels", reason: "Probation violation", issuedBy: "Judge Kim", dateIssued: "2026-07-30", active: false },
+  { id: 1, playerId: 3, playerName: "GhostDriver", reason: "Failure to appear in court", issuedBy: "Judge Alvarez", dateIssued: "2026-08-22", status: "active", active: true, ...undecided },
+  { id: 2, playerId: 4, playerName: "VendettaX", reason: "Outstanding fines", issuedBy: "Judge Alvarez", dateIssued: "2026-08-18", status: "active", active: true, ...undecided },
+  { id: 3, playerId: 5, playerName: "RustyWheels", reason: "Probation violation", issuedBy: "Judge Kim", dateIssued: "2026-07-30", status: "cleared", active: false, ...undecided },
 ];
 
 export function fetchMockRecords(): Promise<{ arrests: ArrestRecord[]; warrants: Warrant[] }> {
@@ -103,28 +120,54 @@ export function fetchPlayers(): Promise<Player[]> {
 
 // Search is done by the server, across ALL records (player name, charge or
 // reason, officer or judge), not just the page that happens to be loaded.
-function searchParams(search?: string) {
-  return search ? { params: { q: search } } : undefined;
+// status narrows the list to one status (e.g. the judge's "requested" queue).
+function listParams(search?: string, status?: string) {
+  const params: Record<string, string> = {};
+  if (search) params.q = search;
+  if (status) params.status = status;
+  return { params };
 }
 
-export function fetchArrests(search?: string): Promise<ArrestRecord[]>{
-  return api.get("/arrests", searchParams(search)).then((res)=>res.data);
+export function fetchArrests(search?: string, status?: ArrestRecord["status"]): Promise<ArrestRecord[]>{
+  return api.get("/arrests", listParams(search, status)).then((res)=>res.data);
 }
 
-export function fetchWarrants(search?: string): Promise<Warrant[]>{
-  return api.get("/warrants", searchParams(search)).then((res)=>res.data);
+export function fetchWarrants(search?: string, status?: WarrantStatus): Promise<Warrant[]>{
+  return api.get("/warrants", listParams(search, status)).then((res)=>res.data);
 }
 
 export function createArrest(arrest: Omit<ArrestRecord,"id" | "playerName">): Promise < ArrestRecord > {
   return api.post("/arrests", arrest).then((res) => res.data);
 }
 
-export function createWarrant(warrant: Omit<Warrant, "id" | "active" | "playerName">): Promise < Warrant > {
+/**
+ * A judge's warrant is active at once; anyone else who may ask for one
+ * creates a request (status "requested") that waits for a judge.
+ */
+export function createWarrant(
+  warrant: Pick<Warrant, "playerId" | "reason" | "issuedBy" | "dateIssued">,
+): Promise < Warrant > {
   return api.post("/warrants", warrant).then((res) => res.data);
 }
 
+export type WarrantAction = "approve" | "deny" | "clear";
+
+export function actOnWarrant(id: number, action: WarrantAction, note?: string): Promise<void> {
+  return api.patch(`/warrants/${id}`, { action, note: note ?? "" }).then(() => undefined);
+}
+
 export function clearWarrant(id: number): Promise<void> {
-  return api.patch(`/warrants/${id}`, { active: false }).then(() => undefined);
+  return actOnWarrant(id, "clear");
+}
+
+/** The server's own explanation of a failed request ("This warrant is denied..."), if it sent one. */
+export function apiErrorMessage(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const data = err.response?.data;
+    if (typeof data === "string" && data.trim()) return data.trim();
+    return err.message;
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 export function updateArrestStatus(id: number, status: ArrestRecord["status"]): Promise<void> {
@@ -141,7 +184,7 @@ export function deletePlayer(id: number): Promise<void> {
 
 export interface Stats {
   players: { total: number; online: number; idle: number; offline: number };
-  warrants: { total: number; active: number };
+  warrants: { total: number; active: number; requested: number };
   arrests: { total: number; pending: number };
 }
 

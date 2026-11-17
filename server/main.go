@@ -52,9 +52,32 @@ type Warrant struct {
 	PlayerID   int    `json:"playerId"`
 	PlayerName string `json:"playerName"` // filled in by the server; ignored on input
 	Reason     string `json:"reason"`
-	IssuedBy   string `json:"issuedBy"`
+	IssuedBy   string `json:"issuedBy"`   // who wrote it: the requesting officer or the issuing judge
 	DateIssued string `json:"dateIssued"` // "" only for old rows whose date was unreadable
-	Active     bool   `json:"active"`
+	// requested -> active (approved) or denied; active -> cleared.
+	// Set by the server; ignored on input.
+	Status       string  `json:"status"`
+	Active       bool    `json:"active"` // status == "active", kept for older clients
+	DecidedBy    *string `json:"decidedBy"`
+	DecidedAt    *string `json:"decidedAt"` // UTC, RFC 3339
+	DecisionNote *string `json:"decisionNote"`
+}
+
+// Warrant statuses.
+const (
+	warrantRequested = "requested"
+	warrantActive    = "active"
+	warrantDenied    = "denied"
+	warrantCleared   = "cleared"
+)
+
+var warrantStatuses = map[string]bool{
+	warrantRequested: true, warrantActive: true, warrantDenied: true, warrantCleared: true,
+}
+
+// Arrest statuses. A voided record stays visible but can't change again.
+var arrestStatuses = map[string]bool{
+	"pending": true, "convicted": true, "released": true, "voided": true,
 }
 
 // ---------------------------------------------------------------------
@@ -228,6 +251,8 @@ const (
 	roleNone role = iota
 	roleViewer
 	rolePolice
+	roleSupervisor
+	roleProsecutor
 	roleJudge
 	roleAdmin
 )
@@ -242,9 +267,12 @@ const (
 	permPlayersDelete permission = "players.delete"
 	permArrestsRead   permission = "arrests.read"
 	permArrestsCreate permission = "arrests.create"
-	permArrestsUpdate permission = "arrests.update"
+	permArrestsDecide permission = "arrests.decide" // convicted / released / back to pending
+	permArrestsVoid   permission = "arrests.void"   // strike a record made in error
 	permWarrantsRead  permission = "warrants.read"
-	permWarrantsIssue permission = "warrants.issue"
+	permWarrantsReq   permission = "warrants.request" // ask a judge for a warrant
+	permWarrantsIssue permission = "warrants.issue"   // issue one directly, already active
+	permWarrantsDec   permission = "warrants.decide"  // approve or deny a request
 	permWarrantsClear permission = "warrants.clear"
 	permStatsRead     permission = "stats.read"
 	permAuditRead     permission = "audit.read"
@@ -253,8 +281,8 @@ const (
 
 var allPermissions = []permission{
 	permPlayersRead, permPlayersUpdate, permPlayersDelete,
-	permArrestsRead, permArrestsCreate, permArrestsUpdate,
-	permWarrantsRead, permWarrantsIssue, permWarrantsClear,
+	permArrestsRead, permArrestsCreate, permArrestsDecide, permArrestsVoid,
+	permWarrantsRead, permWarrantsReq, permWarrantsIssue, permWarrantsDec, permWarrantsClear,
 	permStatsRead, permAuditRead, permMembersManage,
 }
 
@@ -264,21 +292,38 @@ var viewerPermissions = []permission{
 
 // rolePermissions is the single place that decides what each role may do.
 // To change a role, edit this map (and the table in TestRolePermissions).
+//
+//	viewer      reads everything
+//	police      + logs arrests, requests warrants
+//	supervisor  + police, voids records made in error, reads the audit log
+//	prosecutor  + decides arrests (convicted / released), requests warrants
+//	judge       + approves or denies warrant requests, issues and clears warrants
+//	admin       everything, including members and deleting players
 var rolePermissions = map[role][]permission{
 	roleViewer: viewerPermissions,
-	rolePolice: append(append([]permission{}, viewerPermissions...),
-		permArrestsCreate, permArrestsUpdate),
-	roleJudge: append(append([]permission{}, viewerPermissions...),
-		permWarrantsIssue, permWarrantsClear),
-	roleAdmin: allPermissions,
+	rolePolice: withViewer(permArrestsCreate, permWarrantsReq),
+	roleSupervisor: withViewer(permArrestsCreate, permWarrantsReq,
+		permArrestsVoid, permAuditRead),
+	roleProsecutor: withViewer(permArrestsDecide, permWarrantsReq),
+	roleJudge:      withViewer(permWarrantsDec, permWarrantsIssue, permWarrantsClear),
+	roleAdmin:      allPermissions,
 }
 
-// One API key per role for now. An unset key disables that role.
+// withViewer is the viewer's read permissions plus the ones given.
+func withViewer(extra ...permission) []permission {
+	return append(append([]permission{}, viewerPermissions...), extra...)
+}
+
+// One API key per role, for testing and scripts. People normally sign in
+// with Discord and get their role on the Members page. An unset key
+// disables that key (not the role).
 var (
-	adminKey  string
-	viewerKey string
-	policeKey string
-	judgeKey  string
+	adminKey      string
+	viewerKey     string
+	policeKey     string
+	supervisorKey string
+	prosecutorKey string
+	judgeKey      string
 )
 
 func getRole(r *http.Request) role {
@@ -300,6 +345,8 @@ func roleFromKey(key string) role {
 	}{
 		{adminKey, roleAdmin},
 		{judgeKey, roleJudge},
+		{prosecutorKey, roleProsecutor},
+		{supervisorKey, roleSupervisor},
 		{policeKey, rolePolice},
 		{viewerKey, roleViewer},
 	}
@@ -459,13 +506,13 @@ func seed() {
 	}
 
 	warrants := []Warrant{
-		{PlayerID: 3, Reason: "Failure to appear in court", IssuedBy: "Judge Alvarez", DateIssued: "2026-08-22", Active: true},
-		{PlayerID: 4, Reason: "Outstanding fines", IssuedBy: "Judge Alvarez", DateIssued: "2026-08-18", Active: true},
-		{PlayerID: 5, Reason: "Probation violation", IssuedBy: "Judge Kim", DateIssued: "2026-07-30", Active: false},
+		{PlayerID: 3, Reason: "Failure to appear in court", IssuedBy: "Judge Alvarez", DateIssued: "2026-08-22", Status: warrantActive},
+		{PlayerID: 4, Reason: "Outstanding fines", IssuedBy: "Judge Alvarez", DateIssued: "2026-08-18", Status: warrantActive},
+		{PlayerID: 5, Reason: "Probation violation", IssuedBy: "Judge Kim", DateIssued: "2026-07-30", Status: warrantCleared},
 	}
 	for _, w := range warrants {
-		db.Exec(`INSERT INTO warrants (server_id, player_id, reason, issued_by, date_issued, active) VALUES (?, ?, ?, ?, ?, ?)`,
-			defaultServerID, w.PlayerID, w.Reason, w.IssuedBy, w.DateIssued, w.Active)
+		db.Exec(`INSERT INTO warrants (server_id, player_id, reason, issued_by, date_issued, status) VALUES (?, ?, ?, ?, ?, ?)`,
+			defaultServerID, w.PlayerID, w.Reason, w.IssuedBy, w.DateIssued, w.Status)
 	}
 }
 
@@ -574,11 +621,33 @@ func validateArrest(a ArrestRecord) string {
 	if strings.TrimSpace(a.Officer) == "" {
 		return "officer is required"
 	}
-	validStatuses := map[string]bool{"pending": true, "convicted": true, "released": true}
-	if !validStatuses[a.Status] {
+	if a.Status == "" {
+		return ""
+	}
+	if a.Status != "pending" && a.Status != "convicted" && a.Status != "released" {
 		return "status must be pending, convicted, or released"
 	}
 	return ""
+}
+
+// actorName is how the audit trail and warrant decisions name the caller:
+// the Discord username, or "api key".
+func actorName(r *http.Request) string {
+	id, ok := identityFrom(r)
+	if !ok {
+		id = resolveIdentity(r)
+	}
+	if id.Username != "" {
+		return id.Username
+	}
+	return "api key"
+}
+
+// statusFilter reads ?status= for a list. ok is false for a value that isn't
+// one of the allowed statuses; "" means no filter.
+func statusFilter(r *http.Request, allowed map[string]bool) (status string, ok bool) {
+	status = strings.TrimSpace(r.URL.Query().Get("status"))
+	return status, status == "" || allowed[status]
 }
 
 func validateWarrant(wa Warrant) string {
@@ -643,6 +712,11 @@ func arrestsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		limit, offset := paging(r, 50)
 		q := searchTerm(r) // matches player name, charge or officer
+		status, ok := statusFilter(r, arrestStatuses)
+		if !ok {
+			http.Error(w, "status must be pending, convicted, released or voided", http.StatusBadRequest)
+			return
+		}
 
 		load := func() (any, error) {
 			query := `SELECT a.id, a.player_id, COALESCE(p.name, ''), a.charge, a.officer,
@@ -655,6 +729,10 @@ func arrestsHandler(w http.ResponseWriter, r *http.Request) {
 				query += ` AND (p.name LIKE ? ESCAPE '!' OR a.charge LIKE ? ESCAPE '!' OR a.officer LIKE ? ESCAPE '!')`
 				pattern := containsPattern(q)
 				args = append(args, pattern, pattern, pattern)
+			}
+			if status != "" {
+				query += ` AND a.status = ?`
+				args = append(args, status)
 			}
 			query += ` ORDER BY a.id LIMIT ? OFFSET ?`
 			args = append(args, limit, offset)
@@ -679,7 +757,7 @@ func arrestsHandler(w http.ResponseWriter, r *http.Request) {
 		if q != "" {
 			serveUncachedList(w, load)
 		} else {
-			serveCachedList(w, serverID, "arrests", fmt.Sprintf("%d:%d", limit, offset), load)
+			serveCachedList(w, serverID, "arrests", fmt.Sprintf("%d:%d:%s", limit, offset, status), load)
 		}
 
 	case "POST":
@@ -695,6 +773,14 @@ func arrestsHandler(w http.ResponseWriter, r *http.Request) {
 
 		if msg := validateArrest(a); msg != "" {
 			http.Error(w, msg, http.StatusBadRequest)
+			return
+		}
+		if a.Status == "" {
+			a.Status = "pending"
+		}
+		// Logging an arrest is police work; deciding the case is not.
+		if a.Status != "pending" && !can(r, permArrestsDecide) {
+			http.Error(w, "Forbidden: only a prosecutor can log an arrest as convicted or released", http.StatusForbidden)
 			return
 		}
 		date, ok := normalizeDate(a.Date)
@@ -741,10 +827,16 @@ func warrantsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		limit, offset := paging(r, 50)
 		q := searchTerm(r) // matches player name, reason or who issued it
+		status, ok := statusFilter(r, warrantStatuses)
+		if !ok {
+			http.Error(w, "status must be requested, active, denied or cleared", http.StatusBadRequest)
+			return
+		}
 
 		load := func() (any, error) {
 			query := `SELECT w.id, w.player_id, COALESCE(p.name, ''), w.reason, w.issued_by,
-					COALESCE(DATE_FORMAT(w.date_issued, '%Y-%m-%d'), ''), w.active
+					COALESCE(DATE_FORMAT(w.date_issued, '%Y-%m-%d'), ''), w.status,
+					w.decided_by, DATE_FORMAT(w.decided_at, '%Y-%m-%dT%H:%i:%sZ'), w.decision_note
 				FROM warrants w
 				LEFT JOIN players p ON p.id = w.player_id AND p.server_id = w.server_id
 				WHERE w.server_id = ?`
@@ -753,6 +845,10 @@ func warrantsHandler(w http.ResponseWriter, r *http.Request) {
 				query += ` AND (p.name LIKE ? ESCAPE '!' OR w.reason LIKE ? ESCAPE '!' OR w.issued_by LIKE ? ESCAPE '!')`
 				pattern := containsPattern(q)
 				args = append(args, pattern, pattern, pattern)
+			}
+			if status != "" {
+				query += ` AND w.status = ?`
+				args = append(args, status)
 			}
 			query += ` ORDER BY w.id LIMIT ? OFFSET ?`
 			args = append(args, limit, offset)
@@ -766,9 +862,11 @@ func warrantsHandler(w http.ResponseWriter, r *http.Request) {
 			warrants := []Warrant{}
 			for rows.Next() {
 				var wRow Warrant
-				if err := rows.Scan(&wRow.ID, &wRow.PlayerID, &wRow.PlayerName, &wRow.Reason, &wRow.IssuedBy, &wRow.DateIssued, &wRow.Active); err != nil {
+				if err := rows.Scan(&wRow.ID, &wRow.PlayerID, &wRow.PlayerName, &wRow.Reason, &wRow.IssuedBy, &wRow.DateIssued,
+					&wRow.Status, &wRow.DecidedBy, &wRow.DecidedAt, &wRow.DecisionNote); err != nil {
 					return nil, err
 				}
+				wRow.Active = wRow.Status == warrantActive
 				warrants = append(warrants, wRow)
 			}
 			return warrants, rows.Err()
@@ -777,11 +875,19 @@ func warrantsHandler(w http.ResponseWriter, r *http.Request) {
 		if q != "" {
 			serveUncachedList(w, load)
 		} else {
-			serveCachedList(w, serverID, "warrants", fmt.Sprintf("%d:%d", limit, offset), load)
+			serveCachedList(w, serverID, "warrants", fmt.Sprintf("%d:%d:%s", limit, offset, status), load)
 		}
 
 	case "POST":
-		if !can(r, permWarrantsIssue) {
+		// A judge's warrant is active at once; anyone else who may ask for
+		// one creates a request that waits for a judge.
+		var status string
+		switch {
+		case can(r, permWarrantsIssue):
+			status = warrantActive
+		case can(r, permWarrantsReq):
+			status = warrantRequested
+		default:
 			forbidden(w)
 			return
 		}
@@ -790,7 +896,9 @@ func warrantsHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
-		newWarrant.Active = true
+		newWarrant.Status = status
+		newWarrant.Active = status == warrantActive
+		newWarrant.DecidedBy, newWarrant.DecidedAt, newWarrant.DecisionNote = nil, nil, nil
 
 		if msg := validateWarrant(newWarrant); msg != "" {
 			http.Error(w, msg, http.StatusBadRequest)
@@ -803,8 +911,8 @@ func warrantsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		newWarrant.DateIssued = date
 
-		result, err := db.Exec(`INSERT INTO warrants (server_id, player_id, reason, issued_by, date_issued, active) VALUES (?, ?, ?, ?, ?, ?)`,
-			serverID, newWarrant.PlayerID, newWarrant.Reason, newWarrant.IssuedBy, newWarrant.DateIssued, newWarrant.Active)
+		result, err := db.Exec(`INSERT INTO warrants (server_id, player_id, reason, issued_by, date_issued, status) VALUES (?, ?, ?, ?, ?, ?)`,
+			serverID, newWarrant.PlayerID, newWarrant.Reason, newWarrant.IssuedBy, newWarrant.DateIssued, newWarrant.Status)
 		if err != nil {
 			if isForeignKeyError(err) {
 				http.Error(w, "playerId does not exist on this server", http.StatusBadRequest)
@@ -960,26 +1068,78 @@ func warrantByIDHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "PATCH":
-		if !can(r, permWarrantsClear) {
-			forbidden(w)
-			return
-		}
+		// {"action": "approve" | "deny" | "clear", "note": "..."}
+		// The older {"active": false} still means "clear".
 		var body struct {
-			Active bool `json:"active"`
+			Action string `json:"action"`
+			Note   string `json:"note"`
+			Active *bool  `json:"active"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
+		if body.Action == "" && body.Active != nil && !*body.Active {
+			body.Action = "clear"
+		}
 
-		result, err := db.Exec(`UPDATE warrants SET active = ? WHERE id = ? AND server_id = ?`, body.Active, id, serverID)
+		// Each action: who may do it, and the one status it starts from.
+		transitions := map[string]struct {
+			perm     permission
+			from, to string
+		}{
+			"approve": {permWarrantsDec, warrantRequested, warrantActive},
+			"deny":    {permWarrantsDec, warrantRequested, warrantDenied},
+			"clear":   {permWarrantsClear, warrantActive, warrantCleared},
+		}
+		t, known := transitions[body.Action]
+		if !known {
+			http.Error(w, "action must be approve, deny or clear", http.StatusBadRequest)
+			return
+		}
+		if !can(r, t.perm) {
+			forbidden(w)
+			return
+		}
+		note := strings.TrimSpace(body.Note)
+		if len([]rune(note)) > 500 {
+			http.Error(w, "note must be at most 500 characters", http.StatusBadRequest)
+			return
+		}
+
+		// The status check is part of the UPDATE, so two judges acting on
+		// the same request at once can't both succeed.
+		var result sql.Result
+		var err error
+		if t.perm == permWarrantsDec {
+			result, err = db.Exec(`UPDATE warrants
+				SET status = ?, decided_by = ?, decided_at = UTC_TIMESTAMP(), decision_note = NULLIF(?, '')
+				WHERE id = ? AND server_id = ? AND status = ?`,
+				t.to, actorName(r), note, id, serverID, t.from)
+		} else {
+			result, err = db.Exec(`UPDATE warrants SET status = ? WHERE id = ? AND server_id = ? AND status = ?`,
+				t.to, id, serverID, t.from)
+		}
 		if err != nil {
 			serverError(w, err)
 			return
 		}
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
-			http.Error(w, "Warrant not found", http.StatusNotFound)
+		if rows, _ := result.RowsAffected(); rows == 0 {
+			var current string
+			err := db.QueryRow(`SELECT status FROM warrants WHERE id = ? AND server_id = ?`, id, serverID).Scan(&current)
+			switch {
+			case err == sql.ErrNoRows:
+				http.Error(w, "Warrant not found", http.StatusNotFound)
+			case err != nil:
+				serverError(w, err)
+			case current == t.to:
+				// Already done (a double click, or another judge got there
+				// first): nothing to change.
+				w.WriteHeader(http.StatusOK)
+			default:
+				http.Error(w, fmt.Sprintf("This warrant is %s, so it can't be %s", current, map[string]string{
+					"approve": "approved", "deny": "denied", "clear": "cleared"}[body.Action]), http.StatusConflict)
+			}
 			return
 		}
 
@@ -997,7 +1157,7 @@ func arrestByIDHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "PATCH":
-		if !can(r, permArrestsUpdate) {
+		if !can(r, permArrestsDecide) && !can(r, permArrestsVoid) {
 			forbidden(w)
 			return
 		}
@@ -1008,15 +1168,43 @@ func arrestByIDHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
+		if !arrestStatuses[body.Status] {
+			http.Error(w, "status must be pending, convicted, released or voided", http.StatusBadRequest)
+			return
+		}
+		// Voiding strikes a record made in error (supervisor); every other
+		// status is a decision on the case (prosecutor).
+		needed := permArrestsDecide
+		if body.Status == "voided" {
+			needed = permArrestsVoid
+		}
+		if !can(r, needed) {
+			forbidden(w)
+			return
+		}
 
-		result, err := db.Exec(`UPDATE arrests SET status = ? WHERE id = ? AND server_id = ?`, body.Status, id, serverID)
+		// A voided record never changes again; the WHERE clause makes that
+		// check and the update one step.
+		result, err := db.Exec(`UPDATE arrests SET status = ? WHERE id = ? AND server_id = ? AND status <> 'voided'`,
+			body.Status, id, serverID)
 		if err != nil {
 			serverError(w, err)
 			return
 		}
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
-			http.Error(w, "Arrest not found", http.StatusNotFound)
+		if rows, _ := result.RowsAffected(); rows == 0 {
+			var current string
+			err := db.QueryRow(`SELECT status FROM arrests WHERE id = ? AND server_id = ?`, id, serverID).Scan(&current)
+			switch {
+			case err == sql.ErrNoRows:
+				http.Error(w, "Arrest not found", http.StatusNotFound)
+			case err != nil:
+				serverError(w, err)
+			case current == body.Status:
+				// Already so (a double click): nothing to change.
+				w.WriteHeader(http.StatusOK)
+			default: // voided
+				http.Error(w, "This arrest was voided and can't be changed", http.StatusConflict)
+			}
 			return
 		}
 
@@ -1036,8 +1224,9 @@ type statsResponse struct {
 		Offline int `json:"offline"`
 	} `json:"players"`
 	Warrants struct {
-		Total  int `json:"total"`
-		Active int `json:"active"`
+		Total     int `json:"total"`
+		Active    int `json:"active"`
+		Requested int `json:"requested"` // waiting for a judge
 	} `json:"warrants"`
 	Arrests struct {
 		Total   int `json:"total"`
@@ -1071,9 +1260,10 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 			return nil, err
 		}
 
-		err = db.QueryRow(`SELECT COUNT(*), COUNT(CASE WHEN active = 1 THEN 1 END)
+		err = db.QueryRow(`SELECT COUNT(*), COUNT(CASE WHEN status = 'active' THEN 1 END),
+				COUNT(CASE WHEN status = 'requested' THEN 1 END)
 			FROM warrants WHERE server_id = ?`, serverID).
-			Scan(&s.Warrants.Total, &s.Warrants.Active)
+			Scan(&s.Warrants.Total, &s.Warrants.Active, &s.Warrants.Requested)
 		if err != nil {
 			return nil, err
 		}
@@ -1095,6 +1285,10 @@ func roleName(rl role) string {
 		return "admin"
 	case roleJudge:
 		return "judge"
+	case roleProsecutor:
+		return "prosecutor"
+	case roleSupervisor:
+		return "supervisor"
 	case rolePolice:
 		return "police"
 	case roleViewer:
@@ -1167,10 +1361,13 @@ func main() {
 	adminKey = os.Getenv("ADMIN_KEY")
 	viewerKey = os.Getenv("VIEWER_KEY")
 	policeKey = os.Getenv("POLICE_KEY")
+	supervisorKey = os.Getenv("SUPERVISOR_KEY")
+	prosecutorKey = os.Getenv("PROSECUTOR_KEY")
 	judgeKey = os.Getenv("JUDGE_KEY")
 	for name, key := range map[string]string{
 		"ADMIN_KEY": adminKey, "VIEWER_KEY": viewerKey,
-		"POLICE_KEY": policeKey, "JUDGE_KEY": judgeKey,
+		"POLICE_KEY": policeKey, "SUPERVISOR_KEY": supervisorKey,
+		"PROSECUTOR_KEY": prosecutorKey, "JUDGE_KEY": judgeKey,
 	} {
 		if key == "" {
 			log.Printf("%s not set: that API-key role is disabled", name)

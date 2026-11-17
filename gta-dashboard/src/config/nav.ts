@@ -1,5 +1,6 @@
 import {
   LayoutDashboard,
+  Scale,
   Shield,
   ScrollText,
   Users,
@@ -11,8 +12,11 @@ export interface NavItem {
   label: string;
   hint: string;
   icon: LucideIcon;
-  /** The permission (from GET /api/whoami) needed to see this item. */
-  permission: string;
+  /**
+   * The permission (from GET /api/whoami) needed to see this item. A list
+   * means any one of them is enough.
+   */
+  permission: string | string[];
   group: "main" | "admin";
 }
 
@@ -39,6 +43,14 @@ export const NAV: NavItem[] = [
     group: "main",
   },
   {
+    to: "/judicial",
+    label: "Judicial",
+    hint: "Warrant requests, cases to decide",
+    icon: Scale,
+    permission: ["warrants.decide", "arrests.decide"],
+    group: "main",
+  },
+  {
     to: "/admin/audit",
     label: "Audit log",
     hint: "Every change, who made it",
@@ -56,6 +68,11 @@ export const NAV: NavItem[] = [
   },
 ];
 
+/** True when `can` allows the permission, or any one of a list. */
+export function canAny(can: (permission: string) => boolean, permission: string | string[]): boolean {
+  return Array.isArray(permission) ? permission.some(can) : can(permission);
+}
+
 export function visibleNav(can: (permission: string) => boolean): NavItem[] {
-  return NAV.filter((item) => can(item.permission));
+  return NAV.filter((item) => canAny(can, item.permission));
 }

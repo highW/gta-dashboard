@@ -1,18 +1,27 @@
 import { useState } from "react";
-import { createArrest, mockPlayers } from "../services/mockData";
+import { apiErrorMessage, createArrest } from "../services/mockData";
 import type { ArrestRecord } from "../services/mockData";
+import { useAuth } from "../context/AuthContext";
+import PlayerSelect from "./PlayerSelect";
+
+type Decidable = Exclude<ArrestRecord["status"], "voided">;
 
 export default function NewArrestForm({ onCreated }: { onCreated: () => void }) {
-    const [playerId, setPlayerId] = useState(mockPlayers[0]?.id ?? 1);
+    const { can } = useAuth();
+    // Logging an arrest is police work; deciding the case is the prosecutor's.
+    // Only someone who may decide sees the status choice (the server enforces it).
+    const canDecide = can("arrests.decide");
+
+    const [playerId, setPlayerId] = useState<number | null>(null);
     const [charge, setCharge] = useState("");
     const [officer, setOfficer] = useState("");
-    const [status, setStatus] = useState<ArrestRecord["status"]>("pending");
+    const [status, setStatus] = useState<Decidable>("pending");
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (!charge.trim() || !officer.trim()) return;
+        if (playerId === null || !charge.trim() || !officer.trim()) return;
 
         setSubmitting(true);
         setError(null);
@@ -21,7 +30,7 @@ export default function NewArrestForm({ onCreated }: { onCreated: () => void }) 
             playerId,
             charge,
             officer,
-            status,
+            status: canDecide ? status : "pending",
             date: new Date().toISOString().split("T")[0],
         })
             .then(() => {
@@ -30,7 +39,7 @@ export default function NewArrestForm({ onCreated }: { onCreated: () => void }) 
                 setStatus("pending");
                 onCreated();
             })
-            .catch((err) => setError(err.message))
+            .catch((err) => setError(apiErrorMessage(err)))
             .finally(() => setSubmitting(false));
     };
 
@@ -42,21 +51,12 @@ export default function NewArrestForm({ onCreated }: { onCreated: () => void }) 
             <h3 className="text-sm font-bold uppercase text-[var(--text-muted)]">Log New Arrest</h3>
 
             <div className="flex flex-wrap gap-3">
-                <select
-                    value={playerId}
-                    onChange={(e) => setPlayerId(Number(e.target.value))}
-                    className="bg-[var(--bg-page)] border border-[var(--border-color)] rounded-md px-3 py-2 text-sm"
-                >
-                    {mockPlayers.map((p) => (
-                        <option key={p.id} value={p.id}>
-                            {p.name}
-                        </option>
-                    ))}
-                </select>
+                <PlayerSelect value={playerId} onChange={setPlayerId} />
 
                 <input
                     type="text"
                     placeholder="Charge"
+                    aria-label="Charge"
                     value={charge}
                     onChange={(e) => setCharge(e.target.value)}
                     className="bg-[var(--bg-page)] border border-[var(--border-color)] rounded-md px-3 py-2 text-sm flex-1 min-w-[160px]"
@@ -65,30 +65,39 @@ export default function NewArrestForm({ onCreated }: { onCreated: () => void }) 
                 <input
                     type="text"
                     placeholder="Officer"
+                    aria-label="Officer"
                     value={officer}
                     onChange={(e) => setOfficer(e.target.value)}
                     className="bg-[var(--bg-page)] border border-[var(--border-color)] rounded-md px-3 py-2 text-sm w-40"
                 />
 
-                <select
-                    value={status}
-                    onChange={(e) => setStatus(e.target.value as ArrestRecord["status"])}
-                    className="bg-[var(--bg-page)] border border-[var(--border-color)] rounded-md px-3 py-2 text-sm"
-                >
-                    <option value="pending">Pending</option>
-                    <option value="convicted">Convicted</option>
-                    <option value="released">Released</option>
-                </select>
+                {canDecide && (
+                    <select
+                        aria-label="Status"
+                        value={status}
+                        onChange={(e) => setStatus(e.target.value as Decidable)}
+                        className="bg-[var(--bg-page)] border border-[var(--border-color)] rounded-md px-3 py-2 text-sm"
+                    >
+                        <option value="pending">Pending</option>
+                        <option value="convicted">Convicted</option>
+                        <option value="released">Released</option>
+                    </select>
+                )}
 
                 <button
                     type="submit"
-                    disabled={submitting}
+                    disabled={submitting || playerId === null}
                     className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-md"
                 >
                     {submitting ? "Logging..." : "Log Arrest"}
                 </button>
             </div>
 
+            {!canDecide && (
+                <p className="text-xs text-[var(--text-muted)]">
+                    New arrests start as pending. A prosecutor decides the case.
+                </p>
+            )}
             {error && <p className="text-red-400 text-sm">{error}</p>}
         </form>
     );

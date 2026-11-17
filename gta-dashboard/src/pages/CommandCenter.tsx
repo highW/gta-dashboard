@@ -64,8 +64,17 @@ export default function CommandCenter() {
       label: "Pending arrests",
       value: stats?.arrests.pending,
       sub: stats ? `${stats.arrests.total} total` : "",
-      to: "/police/records",
+      to: can("arrests.decide") ? "/judicial" : "/police/records",
     },
+    // Judges see the requests waiting for them.
+    ...(can("warrants.decide")
+      ? [{
+          label: "Warrant requests",
+          value: stats?.warrants.requested,
+          sub: "waiting for a judge",
+          to: "/judicial",
+        }]
+      : []),
   ];
 
   const modules = visibleNav(can).filter((i) => i.to !== "/dashboard");
@@ -88,7 +97,7 @@ export default function CommandCenter() {
             Couldn't load statistics. Retrying...
           </p>
         )}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className={`grid grid-cols-1 gap-3 ${cards.length > 3 ? "sm:grid-cols-2 lg:grid-cols-4" : "sm:grid-cols-3"}`}>
           {cards.map((c) => (
             <Link
               key={c.label}

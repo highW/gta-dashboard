@@ -754,8 +754,8 @@ func TestDates_UnreadableOldDateIsEmpty(t *testing.T) {
 		VALUES (1, 1, 'Old junk', 'Officer Test', NULL, 'pending')`); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO warrants (server_id, player_id, reason, issued_by, date_issued, active)
-		VALUES (1, 1, 'Old junk', 'Judge Test', NULL, 1)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO warrants (server_id, player_id, reason, issued_by, date_issued, status)
+		VALUES (1, 1, 'Old junk', 'Judge Test', NULL, 'active')`); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 

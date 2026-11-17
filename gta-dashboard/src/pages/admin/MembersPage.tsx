@@ -7,6 +7,8 @@ const ROLE_OPTIONS = [
   { value: "none", label: "No access" },
   { value: "viewer", label: "Viewer" },
   { value: "police", label: "Police" },
+  { value: "supervisor", label: "Supervisor" },
+  { value: "prosecutor", label: "Prosecutor" },
   { value: "judge", label: "Judge" },
   { value: "admin", label: "Admin" },
 ];

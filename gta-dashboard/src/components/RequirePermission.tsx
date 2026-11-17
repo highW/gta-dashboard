@@ -1,6 +1,7 @@
 import { Navigate } from "react-router-dom";
 import type { ReactNode } from "react";
 import { useAuth } from "../context/AuthContext";
+import { canAny } from "../config/nav";
 
 /**
  * UX only. Hiding a route is not security: the backend's permission checks
@@ -10,11 +11,12 @@ export default function RequirePermission({
   permission,
   children,
 }: {
-  permission: string;
+  /** One permission, or a list where any one is enough. */
+  permission: string | string[];
   children: ReactNode;
 }) {
   const { can } = useAuth();
-  if (!can(permission)) {
+  if (!canAny(can, permission)) {
     return <Navigate to="/dashboard" replace />;
   }
   return <>{children}</>;

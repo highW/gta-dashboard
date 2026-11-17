@@ -1,5 +1,5 @@
 -- schema.sql: full multi-tenant schema for FRESH installs and tests.
--- Existing databases are upgraded with the files in migrations/ (001 to 004);
+-- Existing databases are upgraded with the files in migrations/ (001 to 005);
 -- every statement here is IF NOT EXISTS / INSERT IGNORE, so running it on
 -- an already-migrated database changes nothing.
 --
@@ -66,8 +66,17 @@ CREATE TABLE IF NOT EXISTS warrants (
   reason      VARCHAR(255) NOT NULL,
   issued_by   VARCHAR(255) NOT NULL,
   date_issued DATE NULL,                 -- same rule as arrests.date
-  active      TINYINT(1) NOT NULL,
+  -- requested -> active (a judge approved it) or denied; active -> cleared.
+  -- A warrant a judge issues directly starts as active.
+  status        VARCHAR(20) NOT NULL,
+  -- Derived from status, never written: kept so "active warrants" stays a
+  -- simple, indexed question.
+  active        TINYINT(1) AS (status = 'active') STORED NOT NULL,
+  decided_by    VARCHAR(255) NULL,       -- the account that approved or denied it
+  decided_at    DATETIME NULL,           -- UTC
+  decision_note VARCHAR(500) NULL,
   KEY idx_warrants_server_active (server_id, active),
+  KEY idx_warrants_server_status (server_id, status),
   KEY idx_warrants_player_server (player_id, server_id),
   CONSTRAINT fk_warrants_player FOREIGN KEY (player_id, server_id) REFERENCES players(id, server_id),
   CONSTRAINT fk_warrants_server FOREIGN KEY (server_id) REFERENCES servers(id)

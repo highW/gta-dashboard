@@ -138,9 +138,16 @@ Auto marks to this repository. Use original artwork only.
 | Role | Can do |
 |---|---|
 | viewer | read players, arrests, warrants, stats |
-| police | viewer + create and update arrests |
-| judge | viewer + issue and clear warrants |
-| admin | everything, including members and the audit log |
+| police | viewer + log arrests, request warrants |
+| supervisor | police + void a record made in error, read the audit log |
+| prosecutor | viewer + decide arrests (convicted / released), request warrants |
+| judge | viewer + approve or deny warrant requests, issue and clear warrants |
+| admin | everything, including members and deleting players |
+
+A warrant moves through `requested → active → cleared`, or `requested →
+denied`. A judge's own warrant starts as active. Arrests start as `pending`
+until a prosecutor decides them; a voided arrest stays on record and never
+changes again. Judges and prosecutors work from the **Judicial** page.
 
 Roles are enforced on the server for every request; hiding a button in the UI
 is only a convenience. People who sign in with Discord get no role until an

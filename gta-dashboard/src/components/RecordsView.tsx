@@ -1,18 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { clearWarrant, fetchArrests, fetchWarrants, updateArrestStatus } from "../services/mockData";
-import type { ArrestRecord, Warrant } from "../services/mockData";
+import { actOnWarrant, apiErrorMessage, fetchArrests, fetchWarrants, updateArrestStatus } from "../services/mockData";
+import type { ArrestRecord, Warrant, WarrantAction } from "../services/mockData";
 import NewWarrantForm from "./NewWarrantForm";
 import NewArrestForm from "./NewArrestForm";
 import { useAuth } from "../context/AuthContext";
+import { ArrestStatus, WarrantBadge } from "./StatusBadge";
 
 // How long to wait after the last keystroke before asking the server.
 const SEARCH_DELAY_MS = 300;
-
-const arrestStatusColor: Record<ArrestRecord["status"], string> = {
-    convicted: "bg-red-500",
-    released: "bg-gray-500",
-    pending: "bg-yellow-500",
-};
 
 export default function RecordsView() {
     const [arrests, setArrests] = useState<ArrestRecord[]>([]);
@@ -70,7 +65,24 @@ export default function RecordsView() {
     const searching = search.trim() !== shownQuery;
     const nothingFound = shownQuery !== "" && arrests.length === 0 && warrants.length === 0;
 
-    const activeWarrantCount = warrants.filter((w) => w.active).length;
+    const activeWarrantCount = warrants.filter((w) => w.status === "active").length;
+    const requestedCount = warrants.filter((w) => w.status === "requested").length;
+
+    // A failed action (e.g. another judge already decided) shows the server's reason.
+    const [actionError, setActionError] = useState<string | null>(null);
+    const act = (p: Promise<void>) => {
+        setActionError(null);
+        return p.then(reload).catch((err) => {
+            setActionError(apiErrorMessage(err));
+            reload();
+        });
+    };
+    const warrantAct = (w: Warrant, action: WarrantAction) => act(actOnWarrant(w.id, action));
+    const voidArrest = (a: ArrestRecord) => {
+        if (window.confirm(`Void the arrest of ${a.playerName || "this player"} for "${a.charge}"? It stays on record as voided and can't be changed again.`)) {
+            act(updateArrestStatus(a.id, "voided"));
+        }
+    };
 
     if (loading) {
         return <div className="text-[var(--text-muted)] py-12 text-center">Loading records...</div>;
@@ -109,12 +121,18 @@ export default function RecordsView() {
 
             {/* Active warrants */}
             <div>
-                {can("warrants.issue") && <NewWarrantForm onCreated = {reload}/>}
-                <h2 className="text-lg font-bold mb-3">
-                    Active Warrants
+                {(can("warrants.issue") || can("warrants.request")) && <NewWarrantForm onCreated = {reload}/>}
+                {actionError && <p role="alert" className="text-red-400 text-sm mt-3">{actionError}</p>}
+                <h2 className="text-lg font-bold mb-3 mt-6">
+                    Warrants
                     <span className="ml-2 text-sm font-normal text-red-400">
-                        ({activeWarrantCount} outstanding)
+                        ({activeWarrantCount} active)
                     </span>
+                    {requestedCount > 0 && (
+                        <span className="ml-2 text-sm font-normal text-amber-400">
+                            {requestedCount} waiting for a judge
+                        </span>
+                    )}
                 </h2>
                 <div className="rounded-lg border border-[var(--border-color)] overflow-hidden">
                     <table className="w-full text-left text-sm">
@@ -135,15 +153,24 @@ export default function RecordsView() {
                                     <td className="px-4 py-3 text-[var(--text-secondary)]">{w.issuedBy}</td>
                                     <td className="px-4 py-3 text-[var(--text-secondary)]">{w.dateIssued || "—"}</td>
                                     <td className="px-4 py-3">
-                                        <span
-                                            className={`px-2 py-1 rounded text-xs font-medium ${w.active ? "bg-red-500/20 text-red-400" : "bg-gray-500/20 text-gray-400"
-                                                }`}
-                                        >
-                                            {w.active ? "ACTIVE" : "CLEARED"}
+                                        <span title={w.decidedBy ? `${w.status === "denied" ? "Denied" : "Approved"} by ${w.decidedBy}${w.decisionNote ? `: ${w.decisionNote}` : ""}` : undefined}>
+                                            <WarrantBadge status={w.status} />
                                         </span>
-                                        {can("warrants.clear") && w.active && (<button
-                                            onClick={()=>clearWarrant(w.id).then(reload)}
-                                            className="ml-2 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] underline">
+                                        {can("warrants.decide") && w.status === "requested" && (
+                                            <>
+                                                <button onClick={() => warrantAct(w, "approve")}
+                                                    className="ml-2 text-xs text-green-400 hover:text-green-300 underline">
+                                                    Approve
+                                                </button>
+                                                <button onClick={() => warrantAct(w, "deny")}
+                                                    className="ml-2 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] underline">
+                                                    Deny
+                                                </button>
+                                            </>
+                                        )}
+                                        {can("warrants.clear") && w.status === "active" && (
+                                            <button onClick={() => warrantAct(w, "clear")}
+                                                className="ml-2 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] underline">
                                                 Clear
                                             </button>
                                         )}
@@ -158,7 +185,7 @@ export default function RecordsView() {
             {/* Arrest history */}
             <div>
                 {can("arrests.create") && <NewArrestForm onCreated={reload}/>}
-                <h2 className="text-lg font-bold mb-3">Arrest History</h2>
+                <h2 className="text-lg font-bold mb-3 mt-6">Arrest History</h2>
                 <div className="rounded-lg border border-[var(--border-color)] overflow-hidden">
                     <table className="w-full text-left text-sm">
                         <thead className="bg-[var(--bg-surface)] text-[var(--text-muted)] uppercase text-xs">
@@ -172,16 +199,17 @@ export default function RecordsView() {
                         </thead>
                         <tbody>
                             {arrests.map((a) => (
-                                <tr key={a.id} className="border-t border-[var(--border-color)]">
+                                <tr key={a.id} className={`border-t border-[var(--border-color)] ${a.status === "voided" ? "opacity-50 line-through decoration-[var(--text-muted)]" : ""}`}>
                                     <td className="px-4 py-3 font-medium">{a.playerName || "Unknown"}</td>
                                     <td className="px-4 py-3 text-[var(--text-secondary)]">{a.charge}</td>
                                     <td className="px-4 py-3 text-[var(--text-secondary)]">{a.officer}</td>
                                     <td className="px-4 py-3 text-[var(--text-secondary)]">{a.date || "—"}</td>
                                     <td className="px-4 py-3">
-                                        {can("arrests.update") ? (
+                                        {can("arrests.decide") && a.status !== "voided" ? (
                                             <select
+                                                aria-label={`Status of ${a.playerName}'s arrest`}
                                                 value={a.status}
-                                                onChange={(e) => updateArrestStatus(a.id, e.target.value as ArrestRecord["status"]).then(reload)}
+                                                onChange={(e) => act(updateArrestStatus(a.id, e.target.value as ArrestRecord["status"]))}
                                                 className="bg-[var(--bg-page)] border border-[var(--border-color)] rounded px-2 py-1 text-xs"
                                             >
                                                 <option value="pending">pending</option>
@@ -189,10 +217,13 @@ export default function RecordsView() {
                                                 <option value="released">released</option>
                                             </select>
                                         ) : (
-                                            <span className="inline-flex items-center gap-2">
-                                                <span className={`w-2 h-2 rounded-full ${arrestStatusColor[a.status]}`} />
-                                                {a.status}
-                                            </span>
+                                            <ArrestStatus status={a.status} />
+                                        )}
+                                        {can("arrests.void") && a.status !== "voided" && (
+                                            <button onClick={() => voidArrest(a)}
+                                                className="ml-3 text-xs text-[var(--text-muted)] hover:text-red-400 underline">
+                                                Void
+                                            </button>
                                         )}
                                     </td>
 

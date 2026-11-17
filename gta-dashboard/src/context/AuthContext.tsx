@@ -8,9 +8,12 @@ import {
 import type { ReactNode } from "react";
 
 // "pending" = signed in with Discord, but no role has been granted yet.
-export type Role = "admin" | "viewer" | "police" | "judge" | "pending" | null;
+export type Role =
+  | "admin" | "judge" | "prosecutor" | "supervisor" | "police" | "viewer" | "pending" | null;
 
-const ROLES = ["admin", "viewer", "police", "judge", "pending"];
+// Must list every role the server can report (roleName in server/main.go);
+// an unknown one is treated as an invalid sign-in.
+const ROLES = ["admin", "judge", "prosecutor", "supervisor", "police", "viewer", "pending"];
 
 // What the server said. Only "invalid" means "not signed in / bad key";
 // "unreachable" (network error, 5xx, rate limit) must NOT log anyone out.

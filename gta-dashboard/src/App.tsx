@@ -16,6 +16,7 @@ import PlayersPage from "./pages/police/PlayersPage";
 import RecordsView from "./components/RecordsView";
 import AuditLogView from "./components/AuditLogView";
 import MembersPage from "./pages/admin/MembersPage";
+import JudicialPage from "./pages/judicial/JudicialPage";
 
 function FullScreenMessage({ children }: { children: React.ReactNode }) {
   return (
@@ -100,6 +101,15 @@ export default function App() {
               <Route path="players" element={<PlayersPage />} />
               <Route path="records" element={<RecordsView />} />
             </Route>
+
+            <Route
+              path="judicial"
+              element={
+                <RequirePermission permission={["warrants.decide", "arrests.decide"]}>
+                  <JudicialPage />
+                </RequirePermission>
+              }
+            />
 
             <Route
               path="admin/audit"
