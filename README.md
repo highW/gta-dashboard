@@ -8,7 +8,40 @@ gta-dashboard/      frontend: React + TypeScript + Vite + Tailwind CSS 3
 server/             backend: Go API (MySQL + Redis)
 server/lb/          small load balancer in front of two API instances
 server/migrations/  SQL change history
+docker/             files used by the containers (MySQL setup, smoke test)
+compose.yaml        the whole stack in containers
+compose.dev.yaml    only MySQL and Redis, for coding
 ```
+
+## Run everything with Docker
+
+You need only Docker (Docker Desktop on Windows and macOS).
+
+```
+copy .env.example .env      # then fill it in: two MySQL passwords and at least ADMIN_KEY
+docker compose up -d --build
+```
+
+Open http://localhost:8000 and sign in with your `ADMIN_KEY`. The first start
+takes a minute or two: images are built and MySQL creates its tables and the
+app's limited database user. A fresh database gets a few demo players.
+
+```
+browser ──► web (nginx) ──► lb ──┬──► api-1 ──┬──► mysql
+                                 └──► api-2 ──┴──► redis
+```
+
+Only `web` is reachable from outside. The others talk over a private Docker
+network and find each other by service name (`mysql`, `redis`, `lb`...).
+MySQL and Redis keep their data in Docker volumes, so `docker compose down`
+and `up` keep everything; `docker compose down -v` deletes it.
+
+After changing code: `docker compose up -d --build` again. Useful while it
+runs: `docker compose ps`, `docker compose logs -f api-1`.
+
+To sign in with Discord, fill in `DISCORD_*` in `.env` and register
+`<PUBLIC_URL>/api/auth/discord/callback` as a redirect in the Discord
+developer portal.
 
 ## Run it locally
 
@@ -17,9 +50,11 @@ You need Docker, Go and Node 22.
 **1. Database and cache**
 
 ```
-docker run -d --name gta-mysql --restart unless-stopped -p 127.0.0.1:3306:3306 -e MYSQL_ROOT_PASSWORD=choose-a-password -e MYSQL_DATABASE=dashboard mysql:8.4
-docker run -d --name gta-redis --restart unless-stopped -p 127.0.0.1:6379:6379 redis:7
+copy .env.example .env      # in the repository root: the two MySQL passwords
+docker compose -f compose.dev.yaml up -d
 ```
+
+This starts only MySQL and Redis, reachable on `localhost` from this machine.
 
 **2. Backend**
 
@@ -34,7 +69,7 @@ another one: `$env:PORT="18080"` before `go run .`.
 
 Edit `server/.env`:
 
-- `MYSQL_DSN`: for example `root:choose-a-password@tcp(localhost:3306)/dashboard`
+- `MYSQL_DSN`: `dashboard_app:<MYSQL_APP_PASSWORD from the root .env>@tcp(localhost:3306)/dashboard`
 - at least one way to sign in: an API key such as `ADMIN_KEY` (use 24+ random
   characters), or Discord login (`DISCORD_*` and `BOOTSTRAP_ADMIN_DISCORD_ID`).
   A key you leave empty switches that role off.

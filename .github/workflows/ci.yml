@@ -61,3 +61,55 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit -p tsconfig.app.json
       - run: npm run build
+
+  # Builds the real images and runs the whole stack the way compose.yaml
+  # describes it, then checks it from the outside.
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Throwaway settings for this run
+        run: |
+          r() { openssl rand -hex 16; }
+          cat > .env <<EOF
+          PUBLIC_URL=http://localhost:8000
+          HTTP_PORT=8000
+          COOKIE_SECURE=false
+          MYSQL_ROOT_PASSWORD=$(r)
+          MYSQL_APP_PASSWORD=$(r)
+          ADMIN_KEY=$(r)
+          VIEWER_KEY=$(r)
+          LB_STATUS_KEY=$(r)
+          EOF
+      - name: Compose files are valid
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.dev.yaml config --quiet
+      - name: Build and start the full stack
+        run: docker compose up -d --build --wait --wait-timeout 300
+      - name: Smoke test from outside
+        run: |
+          set -a; . ./.env; set +a
+          docker/smoke-test.sh
+      - name: Both API instances received traffic
+        run: |
+          docker compose logs --no-color lb > lb.log
+          grep -q "api-1:8080" lb.log && grep -q "api-2:8080" lb.log
+      - name: Demo data was added once, not once per instance
+        run: |
+          set -a; . ./.env; set +a
+          players=$(docker compose exec -T mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N dashboard -e "SELECT COUNT(*) FROM players" 2>/dev/null)
+          echo "players: $players"
+          test "$players" = 5
+      - name: The app's database user cannot drop tables
+        run: |
+          set -a; . ./.env; set +a
+          if docker compose exec -T mysql mysql -udashboard_app -p"$MYSQL_APP_PASSWORD" dashboard -e "DROP TABLE audit_log"; then
+            echo "dashboard_app was allowed to drop a table"; exit 1
+          fi
+      - name: Logs, if anything failed
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Clean up
+        if: always()
+        run: docker compose down -v

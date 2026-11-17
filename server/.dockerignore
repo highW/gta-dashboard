@@ -1,0 +1,10 @@
+# Never copy secrets, data or local builds into the image.
+.env
+.env.*
+!.env.example
+backups/
+*.db
+*.exe
+*.sql.gz
+lb/lb
+dashboard-server

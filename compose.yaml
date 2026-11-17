@@ -1,0 +1,112 @@
+# The whole dashboard in containers:
+#
+#   browser ──► web (nginx :80) ──► lb (:9000) ──┬──► api-1 (:8080) ──┬──► mysql
+#                                                └──► api-2 (:8080) ──┴──► redis
+#
+# Only "web" is reachable from outside (HTTP_PORT, default 8000). The others
+# talk over Compose's private network and find each other by service name.
+#
+#   docker compose up -d --build     start (and rebuild after code changes)
+#   docker compose ps                what is running and healthy
+#   docker compose logs -f api-1     follow one service's log
+#   docker compose down              stop; the data volumes are kept
+#
+# Settings come from .env next to this file (copy .env.example).
+
+name: gta-dashboard
+
+# Shared by both API instances.
+x-api: &api
+  build: ./server
+  restart: unless-stopped
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  environment:
+    PORT: "8080"
+    # The limited user created by docker/mysql/02-app-user.sh, not root.
+    MYSQL_DSN: "dashboard_app:${MYSQL_APP_PASSWORD:?set MYSQL_APP_PASSWORD in .env}@tcp(mysql:3306)/dashboard"
+    REDIS_URL: redis://redis:6379/0
+    # Requests arrive through nginx and the load balancer, both on Docker's
+    # private network. nginx overwrites X-Forwarded-For, so trusting the
+    # private ranges cannot be abused from outside.
+    TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+    ADMIN_KEY: ${ADMIN_KEY:-}
+    VIEWER_KEY: ${VIEWER_KEY:-}
+    POLICE_KEY: ${POLICE_KEY:-}
+    JUDGE_KEY: ${JUDGE_KEY:-}
+    DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+    DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+    DISCORD_REDIRECT_URI: ${PUBLIC_URL:-http://localhost:8000}/api/auth/discord/callback
+    BOOTSTRAP_ADMIN_DISCORD_ID: ${BOOTSTRAP_ADMIN_DISCORD_ID:-}
+    FRONTEND_URL: ${PUBLIC_URL:-http://localhost:8000}
+    COOKIE_SECURE: ${COOKIE_SECURE:-false}
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: dashboard
+      MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD:?set MYSQL_APP_PASSWORD in .env}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # Run only on the very first start (empty volume): tables, then the app user.
+      - ./server/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./docker/mysql/02-app-user.sh:/docker-entrypoint-initdb.d/02-app-user.sh:ro
+    healthcheck:
+      # Over TCP on purpose: during first-time setup MySQL runs a temporary
+      # server without networking, which must not count as ready.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Snapshot to disk every minute when something changed, so logins
+    # survive a restart.
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api-1: *api
+  api-2: *api
+
+  lb:
+    build: ./server
+    entrypoint: ["/app/lb"]
+    restart: unless-stopped
+    depends_on:
+      - api-1
+      - api-2
+    environment:
+      BACKENDS: http://api-1:8080,http://api-2:8080
+      LB_STATUS_KEY: ${LB_STATUS_KEY:-}
+
+  web:
+    build: ./gta-dashboard
+    restart: unless-stopped
+    depends_on:
+      - lb
+    ports:
+      - "${HTTP_PORT:-8000}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  mysql-data:
+  redis-data:

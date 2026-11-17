@@ -1,0 +1,55 @@
+# Only the databases, for day-to-day coding: you run the Go API, the load
+# balancer and `npm run dev` yourself, as before.
+#
+#   docker compose -f compose.dev.yaml up -d     start MySQL and Redis
+#   docker compose -f compose.dev.yaml down      stop them (data is kept)
+#
+# Both are published on 127.0.0.1 only, so they can't be reached from
+# other machines. In server/.env point the API at them:
+#
+#   MYSQL_DSN=dashboard_app:<MYSQL_APP_PASSWORD>@tcp(localhost:3306)/dashboard
+#   REDIS_URL=            (empty = localhost:6379)
+#
+# Separate project and volumes from compose.yaml, so dev data and the full
+# stack's data never mix.
+
+name: gta-dashboard-dev
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: dashboard
+      MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD:?set MYSQL_APP_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./server/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./docker/mysql/02-app-user.sh:/docker-entrypoint-initdb.d/02-app-user.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  mysql-data:
+  redis-data:

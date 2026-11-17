@@ -392,8 +392,35 @@ func initDB(dataSource string, migrate bool) {
 		}
 	}
 
+	seedOnce()
+}
+
+// seedOnce adds the demo data to an empty database, exactly once even when
+// several API instances start at the same moment (as they do under Docker
+// Compose): without the lock, each sees no players and each adds its own
+// copy. A MySQL named lock belongs to one connection, so check and seed run
+// while this connection holds it, and the others wait their turn.
+func seedOnce() {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
+
+	var locked sql.NullInt64
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK('dashboard_seed', 30)").Scan(&locked); err != nil {
+		log.Fatal(err)
+	}
+	if locked.Int64 != 1 {
+		log.Fatal("timed out waiting for another API instance to finish adding the demo data")
+	}
+	defer conn.ExecContext(ctx, "DO RELEASE_LOCK('dashboard_seed')")
+
 	var count int
-	db.QueryRow("SELECT COUNT(*) FROM players WHERE server_id = ?", defaultServerID).Scan(&count)
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM players WHERE server_id = ?", defaultServerID).Scan(&count); err != nil {
+		log.Fatal(err)
+	}
 	if count == 0 {
 		seed()
 	}

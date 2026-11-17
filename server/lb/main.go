@@ -11,6 +11,7 @@ import (
 	"os"
 	"context"
 	"os/signal"
+	"strings"
 	"syscall"
 	"github.com/joho/godotenv"
 )
@@ -26,9 +27,28 @@ type BackendStatus struct {
 	Healthy bool `json:"healthy"` 
 }
 
+// The API instances to balance between. BACKENDS overrides them as a
+// comma-separated list, e.g. "http://api-1:8080,http://api-2:8080" in Docker.
 var backendURLs = []string{
 	"http://localhost:8080",
 	"http://localhost:8081",
+}
+
+func loadBackendURLs() {
+	raw := strings.TrimSpace(os.Getenv("BACKENDS"))
+	if raw == "" {
+		return
+	}
+	var urls []string
+	for _, u := range strings.Split(raw, ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			urls = append(urls, u)
+		}
+	}
+	if len(urls) == 0 {
+		log.Fatal("BACKENDS is set but lists no URLs")
+	}
+	backendURLs = urls
 }
 
 var backends []*Backend
@@ -106,6 +126,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	godotenv.Load("../.env")
+	loadBackendURLs()
 
 	// One connection pool to the API instances, with deadlines. The default
 	// would wait forever for an instance that accepted a request and then
@@ -120,8 +141,8 @@ func main() {
 
 	for _, raw := range backendURLs {
 		target, err := url.Parse(raw)
-		if err != nil {
-			log.Fatal(err)
+		if err != nil || target.Scheme == "" || target.Host == "" {
+			log.Fatalf("backend URL %q is not like http://host:port", raw)
 		}
 		// The proxy appends the caller's address to X-Forwarded-For on every
 		// request; the API uses it to rate limit and audit the real client
@@ -155,7 +176,7 @@ func main() {
 	}
 
 	go func() {
-		log.Println("Load balancer running on http://localhost:9000")
+		log.Printf("Load balancer running on :9000, backends: %s", strings.Join(backendURLs, ", "))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen error: %v", err)
 		}
