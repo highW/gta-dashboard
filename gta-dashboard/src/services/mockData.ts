@@ -208,3 +208,12 @@ export function fetchMembers(): Promise<Member[]> {
 export function setMemberRole(userId: number, role: string): Promise<void> {
   return api.put(`/members/${userId}`, { role }).then(() => undefined);
 }
+/** Network-wide totals for the public landing page (no sign-in needed). */
+export interface PublicStats {
+  players: { online: number };
+  servers: { active: number };
+}
+
+export function fetchPublicStats(): Promise<PublicStats> {
+  return api.get("/public/stats").then((res) => res.data);
+}

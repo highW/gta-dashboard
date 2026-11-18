@@ -23,3 +23,16 @@
   --text-secondary: #4b5563;
   --text-muted: #6b7280;
 }
+/* Landing page: the helicopter's searchlight sweeping the skyline. The only
+   animation on the page; off for anyone who asks for less motion. */
+@keyframes searchlight-sweep {
+  0%, 100% { transform: rotate(-14deg); }
+  50% { transform: rotate(16deg); }
+}
+.searchlight {
+  transform-box: view-box;
+  animation: searchlight-sweep 9s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .searchlight { animation: none; transform: rotate(4deg); }
+}

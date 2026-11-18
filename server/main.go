@@ -1279,6 +1279,35 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// publicStats is what the public landing page may show: network-wide totals
+// only, no names and nothing about any one server.
+type publicStats struct {
+	Players struct {
+		Online int `json:"online"`
+	} `json:"players"`
+	Servers struct {
+		Active int `json:"active"`
+	} `json:"servers"`
+}
+
+// publicStatsHandler needs no sign-in. Counts only servers that are live
+// (status "active"), and is cached briefly like the other lists.
+func publicStatsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	serveCachedList(w, 0, "public_stats", "summary", func() (any, error) {
+		var s publicStats
+		err := db.QueryRow(`SELECT
+				(SELECT COUNT(*) FROM servers WHERE status = 'active'),
+				(SELECT COUNT(*) FROM players p JOIN servers sv ON sv.id = p.server_id
+				  WHERE sv.status = 'active' AND p.status = 'online')`).
+			Scan(&s.Servers.Active, &s.Players.Online)
+		return s, err
+	})
+}
+
 func roleName(rl role) string {
 	switch rl {
 	case roleAdmin:
@@ -1404,6 +1433,9 @@ func main() {
 	http.HandleFunc("/api/whoami", withCORS(rateLimit(whoamiHandler)))
 	http.HandleFunc("/api/audit-log", withCORS(rateLimit(requireAuth(auditLogHandler))))
 	http.HandleFunc("/api/stats", withCORS(rateLimit(requireAuth(statsHandler))))
+	// No method in the pattern: the browser's CORS preflight (OPTIONS) has to
+	// reach withCORS, and the handler itself only answers GET.
+	http.HandleFunc("/api/public/stats", withCORS(rateLimit(publicStatsHandler)))
 	http.HandleFunc("/api/members", withCORS(rateLimit(requireAuth(membersHandler))))
 	http.HandleFunc("/api/members/{id}", withCORS(rateLimit(requireAuth(memberByIDHandler))))
 	http.HandleFunc("GET /api/auth/discord", withCORS(rateLimit(discordStartHandler)))
